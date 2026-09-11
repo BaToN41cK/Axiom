@@ -5,6 +5,7 @@ command palette (Ctrl+P), keyboard navigation and reactive state.
 """
 
 import asyncio
+from functools import partial
 from typing import Optional
 
 from rich.text import Text
@@ -51,6 +52,12 @@ STEP_EVENTS = {
 THINKING_PREVIEW = 400
 
 
+class StepBlock(Static):
+    """Static block marking an agent-workflow step journal in the chat."""
+
+    is_step_block = True
+
+
 class AxiomCommands(Provider):
     """Command palette commands (Ctrl+P)."""
 
@@ -69,15 +76,14 @@ class AxiomCommands(Provider):
         ]
 
     async def search(self, query: str) -> Hits:
-        matcher = self.fuzzy_matcher
+        matcher = self.matcher(query)
         for name, action, desc in self.commands:
-            score = matcher.match(query, name)
+            score = matcher.match(name)
             if score > 0:
                 yield Hit(
                     score,
                     matcher.highlight(name),
-                    self.app.run_action,
-                    action,
+                    partial(self.app.run_action, action),
                     help=desc,
                 )
 
@@ -423,8 +429,9 @@ class AxiomTUI(App):
             elif isinstance(result, dict) and result.get("error"):
                 self.tasklog.fail("Web Research", "failed")
             else:
-                self.tasklog.complete(
-                    "Web Research", f"{self.agent.status.source_count} sources")
+                agent = self.agent
+                count = agent.status.source_count if agent and agent.status else 0
+                self.tasklog.complete("Web Research", f"{count} sources")
         self._render_steps()
 
     def _render_steps(self):
@@ -433,9 +440,8 @@ class AxiomTUI(App):
             if getattr(widget, "is_step_block", False):
                 widget.remove()
         if self.tasklog.steps:
-            widget = Static(self.tasklog.render())
+            widget = StepBlock(self.tasklog.render())
             widget.can_focus = False
-            widget.is_step_block = True
             self.chat_log.mount(widget)
         self._scroll_end()
 
@@ -462,13 +468,13 @@ class AxiomTUI(App):
         if cmd in ("/exit", "/quit", "/q"):
             self.exit()
         elif cmd == "/clear":
-            self.run_action("clear_chat")
+            await self.run_action("clear_chat")
         elif cmd == "/new":
-            self.run_action("start_new_session")
+            await self.run_action("start_new_session")
         elif cmd == "/web":
-            self.run_action("toggle_web")
+            await self.run_action("toggle_web")
         elif cmd == "/thinking":
-            self.run_action("toggle_thinking")
+            await self.run_action("toggle_thinking")
         elif cmd == "/model":
             self._log_line(f"Model: {self.model_name}", "bold")
         elif cmd == "/models":
@@ -506,8 +512,12 @@ class AxiomTUI(App):
         self._log_line("AXIOM", "bold cyan")
 
         async def work() -> dict:
+            agent = self.agent
+            if agent is None:
+                return {"success": False, "cancelled": False,
+                        "content": "", "error": "not connected"}
             try:
-                return await self.agent.process_message(
+                return await agent.process_message(
                     message,
                     on_token=self._on_token,
                     on_status=self._on_status,
