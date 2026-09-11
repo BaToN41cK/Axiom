@@ -1,59 +1,61 @@
-# Python
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
 *.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
 
-# Virtual environments
+# --- Virtual environments ---
+.venv/
 venv/
 env/
 ENV/
-.venv/
-.env
 
-# IDE
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# --- Type checkers / linters ---
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# --- IDE / editors ---
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Type checking
-.mypy_cache/
-.pyre/
-.pytype/
-
-# Ruff
-.ruff_cache/
-
-# Project specific
-.axiom/logs/
-.axiom/sessions/
-.axiom/*.db
-*.log
-
-# OS
+*~
 .DS_Store
 Thumbs.db
+
+# --- Logs / temp files ---
+*.log
+*.tmp
+*.bak
+_test_*.txt
+pytest_output.txt
+
+# --- Distribution / packaging output ---
+*.whl.lock
+pdm.lock
+poetry.lock
+# NOTE: keep requirements.txt tracked; lock files above are optional
