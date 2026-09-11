@@ -29,6 +29,7 @@ from src.config import config
 from src.session import Session
 from src.agent import Agent
 from src.ui.tasklog import TaskLog
+from src.ui.theme import resolve_text
 from src.ui.startup import check_ollama_connection, check_model_available
 from src.ollama import OllamaClient
 
@@ -340,7 +341,7 @@ class AxiomTUI(App):
     def _refresh_sidebar(self):
         """Update the tabbed sidebar: workflow, session tree, context."""
         try:
-            self.query_one("#workflow", Static).update(self.tasklog.render())
+            self.query_one("#workflow", Static).update(resolve_text(self.tasklog.render()))
         except Exception:
             pass
 
@@ -440,7 +441,7 @@ class AxiomTUI(App):
             if getattr(widget, "is_step_block", False):
                 widget.remove()
         if self.tasklog.steps:
-            widget = StepBlock(self.tasklog.render())
+            widget = StepBlock(resolve_text(self.tasklog.render()))
             widget.can_focus = False
             self.chat_log.mount(widget)
         self._scroll_end()

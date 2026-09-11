@@ -1,5 +1,6 @@
 """AXIOM color theme and visual styling."""
 
+from rich.text import Text
 from rich.theme import Theme
 
 # AXIOM color palette — minimal, professional, technological
@@ -50,6 +51,31 @@ AXIOM_THEME = Theme({
     "tree": "bright_cyan",
     "tree.selected": "bold bright_white on dark_blue",
 })
+
+
+def resolve_text(text: Text) -> Text:
+    """Return a copy of ``text`` with AXIOM theme style names baked in.
+
+    Rich ``Text`` objects with named styles (e.g. ``status.active``) can only
+    be resolved by a console that has ``AXIOM_THEME`` registered. Textual
+    widgets resolve styles via the Textual app console, which does not know
+    the theme, raising ``MissingStyle`` at render time. Replacing the names
+    with concrete ``rich.style.Style`` objects makes the text renderable
+    anywhere.
+    """
+    from rich.text import Span
+
+    def resolve(style):
+        if isinstance(style, str):
+            return AXIOM_THEME.styles.get(style, style)
+        return style
+
+    resolved = Text(text.plain, style=resolve(text.style))
+    resolved.spans.extend(
+        Span(start, end, resolve(style))
+        for start, end, style in text.spans
+    )
+    return resolved
 
 # Status indicators
 SYMBOLS = {
