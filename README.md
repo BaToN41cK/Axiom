@@ -6,12 +6,15 @@ AXIOM is a modern terminal interface for local AI models. It connects to Ollama 
 
 ## Features
 
+- **Interactive TUI** — Full-screen Textual interface: split layout, scrolling, mouse support
+- **Command Palette** — `Ctrl+P` for quick commands
+- **Live Agent Journal** — Thinking / Planning / Search / Research steps update in place
 - **Chat** — Stream responses from your local model
 - **Thinking/Reasoning** — Display model reasoning when available
 - **Web Search** — Search the web for current information
 - **Web Research** — Fetch and extract content from web pages
 - **Session History** — Keep conversation context during session
-- **Slash Commands** — `/help`, `/status`, `/model`, `/models`, `/clear`, `/new`, `/exit`
+- **Slash Commands** — `/help`, `/status`, `/model`, `/models`, `/clear`, `/new`, `/thinking`, `/web`, `/exit`
 
 ## Requirements
 
