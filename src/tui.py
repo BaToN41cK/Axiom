@@ -12,8 +12,16 @@ from rich.markdown import Markdown as RichMarkdown
 
 from textual import on
 from textual.app import App, ComposeResult
-from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Static, Input, Footer
+from textual.containers import Vertical, VerticalScroll, Horizontal
+from textual.widgets import (
+    Static,
+    Input,
+    Footer,
+    TabbedContent,
+    TabPane,
+    ProgressBar,
+    Tree,
+)
 from textual.command import Provider, Hit, Hits
 
 from src.config import config
@@ -56,6 +64,7 @@ class AxiomCommands(Provider):
             ("change model", "show_models", "List models available in Ollama"),
             (f"{web_state} web tools", "toggle_web", "Toggle web search tools"),
             (f"{think_state} thinking", "toggle_thinking", "Toggle reasoning display"),
+            ("toggle sidebar", "toggle_sidebar", "Show or hide the sidebar (Ctrl+B)"),
             ("exit", "quit", "Close AXIOM"),
         ]
 
@@ -81,13 +90,23 @@ class AxiomTUI(App):
 
     CSS = """
     #topbar { height: 1; background: $surface; padding: 0 1; }
+    #main { height: 1fr; }
     #chat {
-        height: 1fr;
-        padding: 0 2;
+        width: 1fr;
+        padding: 0 1;
         scrollbar-background: $surface;
         scrollbar-color: $primary-darken-1;
     }
     #log { height: auto; }
+    #sidebar {
+        width: 34;
+        min-width: 24;
+        border-left: round $primary-darken-1;
+        padding: 0 1;
+    }
+    #sidebar TabPane { padding: 1 1; }
+    #ctxbar { margin-bottom: 1; }
+    #context_info { color: $text-muted; }
     #stats { height: 1; background: $surface; padding: 0 1; }
     #prompt {
         height: 3;
@@ -101,6 +120,7 @@ class AxiomTUI(App):
     BINDINGS = [
         ("ctrl+c", "cancel_or_quit", "Cancel/Quit"),
         ("ctrl+l", "clear_chat", "Clear"),
+        ("ctrl+b", "toggle_sidebar", "Sidebar"),
         ("escape", "cancel_generation", "Cancel"),
     ]
 
@@ -126,8 +146,18 @@ class AxiomTUI(App):
 
     def compose(self) -> ComposeResult:
         yield Static(id="topbar")
-        with VerticalScroll(id="chat"):
-            yield Vertical(id="log")
+        with Horizontal(id="main"):
+            with VerticalScroll(id="chat"):
+                yield Vertical(id="log")
+            with TabbedContent(id="sidebar"):
+                with TabPane("WORKFLOW"):
+                    yield Static(id="workflow")
+                with TabPane("SESSION"):
+                    yield Tree("AXIOM", id="session_tree")
+                with TabPane("CONTEXT"):
+                    yield ProgressBar(id="ctxbar", total=100, show_eta=False,
+                                      show_percentage=True)
+                    yield Static(id="context_info")
         yield Static(id="stats")
         yield Input(placeholder="Ask AXIOM anything...", id="prompt")
         yield Footer()
@@ -186,7 +216,13 @@ class AxiomTUI(App):
     async def action_cancel_generation(self):
         """Abort the current generation."""
         if self.agent is not None and self.busy:
+            self.notify("Generation cancelled", severity="warning", timeout=4)
             self.agent.cancel()
+
+    async def action_toggle_sidebar(self):
+        """Ctrl+B — show or hide the right sidebar."""
+        sidebar = self.query_one("#sidebar", TabbedContent)
+        sidebar.display = not sidebar.display
 
     async def action_clear_chat(self):
         """Clear the visible conversation log."""
@@ -246,7 +282,6 @@ class AxiomTUI(App):
     def chat_log(self) -> Vertical:
         """The conversation log container."""
         return self.query_one("#log", Vertical)
-        return self.query_one("#log", Vertical)
 
     def _scroll_end(self):
         self.query_one("#chat", VerticalScroll).scroll_end(animate=False)
@@ -294,6 +329,41 @@ class AxiomTUI(App):
             (f" │ TOOLS {self.session.total_tools}", "dim"),
             (f"   {label}", state_style),
         ))
+        self._refresh_sidebar()
+
+    def _refresh_sidebar(self):
+        """Update the tabbed sidebar: workflow, session tree, context."""
+        try:
+            self.query_one("#workflow", Static).update(self.tasklog.render())
+        except Exception:
+            pass
+
+        try:
+            tree = self.query_one("#session_tree", Tree)
+            tree.clear()
+            tree.root.expand()
+            tree.root.add_leaf(f"model      {self.model_name}")
+            tree.root.add_leaf(f"state      {STATE_LABEL.get(self.state, '?')}")
+            tree.root.add_leaf(f"web        {'on' if config.web_enabled else 'off'}")
+            tree.root.add_leaf(f"thinking   {'on' if config.reasoning_enabled else 'off'}")
+            tree.root.add_leaf(f"messages   {len(self.session.messages)}")
+            tree.root.add_leaf(f"searches   {self.session.total_searches}")
+            tree.root.add_leaf(f"tools      {self.session.total_tools}")
+        except Exception:
+            pass
+
+        try:
+            bar = self.query_one("#ctxbar", ProgressBar)
+            bar.update(progress=self.session.context_percentage)
+            used = self.session.total_tokens
+            limit = config.context_window
+            info = self.query_one("#context_info", Static)
+            if used:
+                info.update(f"tokens  {used:,} / {limit:,}")
+            else:
+                info.update(f"tokens  — / {limit:,}")
+        except Exception:
+            pass
 
     def _set_state(self, state: str):
         self.state = state
