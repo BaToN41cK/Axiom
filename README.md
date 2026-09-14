@@ -1,130 +1,165 @@
-# AXIOM
+# AXIOM — Local Intelligence Terminal Workspace
 
-**Local AI Terminal Client** — powered by Ollama.
+**AXIOM** — премиальный терминальный AI-клиент, работающий на локальном Ollama.
+Это не «ещё один чат в консоли»: это ядро с агентным циклом, инструментами и
+web search, обёрнутое в законченный TUI-воркспейс и скриптуемый CLI.
 
-AXIOM is a modern terminal interface for local AI models. It connects to Ollama and provides a beautiful, streaming chat experience with web search capabilities.
+```
+                    AXIOM CORE
+                        │
+        ┌───────────────┼───────────────┐
+        │               │               │
+     TUI (Textual)   CLI (argparse)  GUI (контракт)
+        │               │               │
+        └───────────────┼───────────────┘
+                        │
+              Event Stream + команды
+                        │
+          Chat / Agent / Tools / Search
+                        │
+                     Ollama
+```
 
-## Features
+## Ключевые свойства
 
-- **Interactive TUI** — Full-screen Textual interface: split layout, scrolling, mouse support
-- **Command Palette** — `Ctrl+P` for quick commands
-- **Live Agent Journal** — Thinking / Planning / Search / Research steps update in place
-- **Chat** — Stream responses from your local model
-- **Thinking/Reasoning** — Display model reasoning when available
-- **Web Search** — Search the web for current information
-- **Web Research** — Fetch and extract content from web pages
-- **Session History** — Keep conversation context during session
-- **Slash Commands** — `/help`, `/status`, `/model`, `/models`, `/clear`, `/new`, `/thinking`, `/web`, `/exit`
+* **REAL FIRST** — ничего не симулируется: reasoning появляется только если
+  модель его реально отдаёт, источники — только если поиск действительно
+  выполнялся, статусы — только реальные состояния бэкенда.
+* **Streaming** — ответ и reasoning отображаются по мере генерации, UI не
+  блокируется.
+* **Thinking** — реальный reasoning модели выводится в отдельный сворачиваемый
+  блок и чётко отделён от ответа.
+* **Agent loop** — модель может вызывать инструменты (`web_search`,
+  `fetch_url`); ядро ограничивает число инструментальных раундов.
+* **Web Search** — без API-ключей (DuckDuckGo HTML), с кликабельными
+  источниками и чтением страниц.
+* **Slash-команды** — меню `/` с фильтрацией и автодополнением.
+* **Автообнаружение моделей** — список и capabilities берутся из `/api/tags`;
+  невысказанные Ollama возможности честно помечаются `unknown`.
+* **История и конфиг** — сохраняются локально в `~/.axiom`, без баз данных.
+* **State machine** — состояния генерации валидируются явно; UI не может
+  показать `Completed ✓` при пустом ответе.
 
-## Requirements
+## Требования
 
-- Python 3.10+
-- Ollama running locally
-- A model installed (default: `qwen3:8b`)
+| Компонент | Версия |
+|---|---|
+| Python | 3.11+ |
+| Ollama | любая актуальная (проверено на 0.34.0) |
+| Терминал | Windows Terminal / any UTF-8 terminal |
 
-## Installation
+Зависимости ставятся автоматически: `httpx`, `pydantic`, `textual`.
+
+## Установка
 
 ```bash
+git clone https://github.com/BaToN41cK/Axiom.git
+cd Axiom
 pip install -e .
 ```
 
-## Usage
-
-Make sure Ollama is running:
+Для разработки (pytest и инструменты):
 
 ```bash
-ollama serve
+pip install -e ".[dev]"
 ```
 
-Pull the default model:
+## Настройка Ollama
+
+1. Установите Ollama: <https://ollama.com/download>
+2. Убедитесь, что сервер запущен: `ollama serve` (обычно стартует автоматически
+   и слушает `http://127.0.0.1:11434`).
+3. Скачайте модель:
 
 ```bash
-ollama pull qwen3:8b
+ollama pull qwen3:8b        # или любую другую, например:
+ollama pull deepseek-r1:8b  # с reasoning
+ollama pull gemma4:12b      # с tools и vision
 ```
 
-Run AXIOM:
+При первом запуске AXIOM сам найдёт Ollama и выберет модель — ручная настройка
+не требуется.
+
+## Быстрый старт: TUI
 
 ```bash
 axiom
 ```
 
-Or:
+Заставка проверит Ollama и модели → главный экран. Основное:
+
+* печатайте сообщение, `Enter` — отправить (стриминговый ответ появится сразу);
+* `/` — меню slash-команд, `↑`/`↓` — навигация, `Tab` — дополнить;
+* `Ctrl+J` — перенос строки внутри промпта;
+* `Ctrl+C` — остановить генерацию (появляется кнопка Stop);
+* `Ctrl+Q` — выход.
+
+Все команды и горячие клавиши: [docs/tui.md](docs/tui.md).
+
+## CLI: one-shot, pipe и JSON
+
+AXIOM — не только TUI. CLI-фронтенд использует то же ядро:
 
 ```bash
-python -m src
+axiom -p "объясни asyncio"            # ответ в stdout
+echo "вопрос" | axiom                 # pipe-режим
+axiom --json -p "2+2"                 # NDJSON-поток событий
+axiom --list-models                   # модели и capabilities
+axiom -m gemma4:12b -p "..."          # модель на этот запуск
+axiom -s -p "новости AI сегодня"      # принудительный web search
+axiom --think on -p "..."             # reasoning: auto|on|off
+axiom --no-search -p "..."            # отключить поиск
+axiom --ollama-url http://host:11434 -p "..."
+axiom --show-reasoning -p "..."       # reasoning в stderr
+axiom --version                       # AXIOM 1.0.0
+axiom --gui                           # слот GUI (честно сообщит, что не реализован)
 ```
 
-## Configuration
+Полное описание и формат JSON-событий: [docs/cli.md](docs/cli.md).
 
-Create a `.env` file (copy from `.env.example`):
+## Slash-команды
 
-```env
-OLLAMA_HOST=http://localhost:11434
-AXIOM_MODEL=qwen3:8b
-AXIOM_WEB_ENABLED=true
-AXIOM_REASONING_ENABLED=true
+| Команда | Действие |
+|---|---|
+| `/help` | справка |
+| `/model [name]` | сменить модель (панель или сразу по имени) |
+| `/models` | список моделей, capabilities, `r` — обновить |
+| `/clear`, `/new` | новый разговор |
+| `/history` | история: Enter — открыть, `d` — удалить |
+| `/settings` | настройки |
+| `/search <query>` | сообщение с принудительным поиском |
+| `/status` | сервер, модель, метрики |
+| `/exit` | выход |
+
+## Конфигурация
+
+Всё хранится в `~/.axiom/config.json` (переопределяется `AXIOM_HOME`), история
+разговоров — в `~/.axiom/history/`. Первый запуск работает без настройки.
+Полная таблица полей: [docs/configuration.md](docs/configuration.md).
+
+## Устранение неполадок
+
+| Проблема | Решение |
+|---|---|
+| `Ollama is not reachable` | запустите `ollama serve`; проверьте адрес: `axiom --list-models` |
+| `No models are installed` | `ollama pull qwen3:8b` |
+| Поиск не работает | проверьте сеть/прокси; поиск требует интернет, чат — нет |
+| Кракозябры в Windows-консоли | используйте Windows Terminal; `chcp 65001` |
+| Удалённый Ollama | `--ollama-url` или поле `ollama_url` в конфиге; локальный трафик идёт в обход системного прокси |
+| Модель «думает», но ответа нет | AXIOM покажет понятную ошибку empty-response вместо ложного `Completed`; попробуйте другую модель |
+
+## Структура проекта
+
+```text
+src/axiom/        core (frontend-agnostic) + frontends (tui/cli/gui) + shared
+docs/             архитектура, гайды по TUI/CLI, конфигурация, разработка
+assets/           логотип
 ```
 
-## Commands
+Подробности: [docs/architecture.md](docs/architecture.md) ·
+[docs/development.md](docs/development.md)
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show help |
-| `/status` | Show connection status |
-| `/model` | Show current model |
-| `/models` | List available models |
-| `/clear` | Clear session |
-| `/thinking` | Toggle thinking display |
-| `/web` | Toggle web tools |
-| `/new` | New session |
-| `/exit` | Exit AXIOM |
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send message |
-| `Ctrl+C` | Cancel generation |
-| `Ctrl+L` | Clear screen |
-| `↑ / ↓` | Navigate input history |
-
-## Architecture
-
-```
-src/
-├── __init__.py      - Package info
-├── __main__.py      - Entry point (python -m src)
-├── app.py           - Main application & UI loop
-├── config.py        - Configuration management
-├── ollama.py        - Ollama API client
-├── web_tools.py     - Web search & fetch
-├── session.py       - Session & history
-├── agent.py         - AI agent orchestration
-├── commands.py      - Slash commands
-├── utils.py         - Utilities
-└── ui/
-    ├── theme.py     - Color theme
-    ├── renderer.py  - Rich rendering
-    ├── startup.py   - Startup screen
-    └── status.py    - Status tracking
-```
-
-## Current Scope
-
-**Enabled:**
-- Chat with streaming
-- Thinking/Reasoning display
-- Web Search (DuckDuckGo)
-- Web Research (fetch & extract)
-- Session history
-
-**Disabled (future):**
-- File access
-- Terminal commands
-- Memory
-- PC control
-- Browser automation
-
-## License
+## Лицензия
 
 MIT
+

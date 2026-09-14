@@ -1,0 +1,444 @@
+/* AXIOM theme — absolute black, deep obsidian garnet accents, ash greys.
+   The garnet accent is used sparingly: active states, selection, separators. */
+
+/* --------------------------------------------------------------- base */
+
+Screen {
+    background: #000000;
+    color: #FFFFFF;
+}
+
+/* -------------------------------------------------------------- splash */
+
+#splash-screen {
+    background: #000000;
+}
+
+#splash-column {
+    width: 1fr;
+    height: 1fr;
+    align: center middle;
+    content-align: center middle;
+}
+
+#splash-logo {
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+#splash-rule {
+    color: #6B141C;
+}
+
+#splash-subtitle {
+    color: #777777;
+    margin-bottom: 1;
+}
+
+#splash-steps {
+    height: auto;
+    max-height: 12;
+    margin-bottom: 1;
+}
+
+.splash-step {
+    color: #B9B9B9;
+}
+
+.splash-step.failed {
+    color: #8E3038;
+}
+
+#splash-message {
+    color: #777777;
+    margin-bottom: 1;
+}
+
+#splash-message.failed {
+    color: #8E3038;
+    text-style: bold;
+}
+
+#splash-actions {
+    height: auto;
+    content-align: center middle;
+}
+
+.action {
+    margin: 0 2;
+    padding: 0 2;
+    border: round #3A3A3A;
+    color: #B9B9B9;
+}
+
+.action:hover {
+    border: round #6B141C;
+    color: #FFFFFF;
+}
+
+.action.selected {
+    border: tall #6B141C;
+    color: #FFFFFF;
+    background: #3B0A10;
+}
+
+/* -------------------------------------------------------------- header */
+
+HeaderBar {
+    height: 1;
+    background: #050505;
+    padding: 0 2;
+}
+
+#header-brand {
+    width: auto;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+#header-model {
+    width: 1fr;
+    padding-left: 2;
+    color: #B9B9B9;
+}
+
+#header-connection {
+    width: auto;
+    color: #7E9E86;
+}
+
+#header-connection.offline {
+    color: #8E3038;
+}
+
+/* ----------------------------------------------------------- chat view */
+
+#chat-view {
+    height: 1fr;
+    background: #000000;
+    padding: 1 2;
+}
+
+#follow-hint {
+    width: 1fr;
+    height: 1;
+    color: #777777;
+    background: #161616;
+    padding: 0 1;
+}
+
+.message {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.role-label {
+    width: 1fr;
+    height: auto;
+}
+
+.user-message .role-label {
+    color: #777777;
+}
+
+.user-message .message-body {
+    color: #FFFFFF;
+    margin: 0 0 1 2;
+}
+
+.assistant-message .role-label {
+    color: #6B141C;
+    text-style: bold;
+}
+
+.assistant-status {
+    height: auto;
+    color: #777777;
+    margin-left: 2;
+}
+
+.block-label {
+    color: #6E5A3A;
+    text-style: bold;
+    margin: 1 0 0 2;
+}
+
+#answer-markdown {
+    height: auto;
+    margin: 0 0 0 4;
+    color: #FFFFFF;
+}
+
+.metrics-footer {
+    color: #777777;
+    margin: 0 0 1 4;
+}
+
+.error-box {
+    border-left: thick #8E3038;
+    background: #161616;
+    color: #FFFFFF;
+    margin: 1 0 1 2;
+    padding: 0 2;
+}
+
+.message-note {
+    color: #777777;
+    margin: 0 0 1 4;
+}
+
+/* ----------------------------------------------------------- reasoning */
+
+.reasoning-panel {
+    height: auto;
+    margin: 0 0 1 2;
+}
+
+.reasoning-panel Collapsible {
+    height: auto;
+    background: transparent;
+    border-left: outer #3B0A10;
+    padding: 0;
+}
+
+.reasoning-panel CollapsibleTitle {
+    color: #B9B9B9;
+}
+
+#reasoning-text {
+    color: #777777;
+    padding-left: 2;
+}
+
+/* -------------------------------------------------------------- search */
+
+.search-panel {
+    height: auto;
+    margin: 0 0 1 2;
+    border-left: outer #3B0A10;
+    padding-left: 1;
+}
+
+#search-steps {
+    color: #777777;
+}
+
+#search-sources {
+    height: auto;
+    max-height: 8;
+    background: transparent;
+}
+
+#search-sources > ListItem {
+    background: transparent;
+}
+
+#search-sources > ListItem:hover {
+    background: #161616;
+}
+
+.source-title {
+    color: #B9B9B9;
+}
+
+.source-url {
+    color: #4A4642;
+}
+
+/* -------------------------------------------------------------- prompt */
+
+InputBar {
+    height: auto;
+    background: #050505;
+    border-top: solid #262626;
+}
+
+#prompt-row {
+    height: auto;
+    padding: 0 1;
+}
+
+#prompt-glyph {
+    width: auto;
+    color: #6B141C;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#prompt-glyph.busy {
+    color: #8E3038;
+}
+
+#prompt-input {
+    height: auto;
+    max-height: 8;
+    background: transparent;
+    border: none;
+    padding: 0 1;
+}
+
+#stop-button {
+    width: auto;
+    color: #FFFFFF;
+    background: #3B0A10;
+    border: round #6B141C;
+    padding: 0 2;
+    margin: 0 1;
+    text-align: center;
+}
+
+#stop-button:hover {
+    background: #4A0E14;
+}
+
+#input-hint {
+    height: 1;
+    color: #4A4642;
+    padding: 0 2;
+}
+
+/* ------------------------------------------------------- command menu */
+
+#command-menu {
+    height: auto;
+    max-height: 12;
+    margin: 0 1;
+    border: round #3B0A10;
+    background: #080808;
+}
+
+#command-menu-title {
+    color: #6B141C;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#command-menu-list {
+    height: auto;
+    max-height: 10;
+    background: transparent;
+    padding: 0 1;
+}
+
+/* ---------------------------------------------------------- status bar */
+
+#status-bar {
+    height: 1;
+    background: #050505;
+    color: #777777;
+    padding: 0 2;
+}
+
+/* -------------------------------------------------------------- panels */
+
+PanelScreen {
+    align: center middle;
+}
+
+.panel {
+    width: 72;
+    max-width: 92%;
+    height: auto;
+    max-height: 84%;
+    border: round #3B0A10;
+    background: #080808;
+    padding: 1 2;
+}
+
+.panel-subtitle {
+    color: #777777;
+    margin-bottom: 1;
+}
+
+#panel-body {
+    height: auto;
+    max-height: 26;
+}
+
+.panel-note {
+    color: #777777;
+    margin-top: 1;
+}
+
+#model-list,
+#history-list,
+#help-list {
+    height: auto;
+    max-height: 20;
+    background: transparent;
+}
+
+.settings-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.settings-label {
+    width: 1fr;
+    color: #B9B9B9;
+}
+
+#temperature-input {
+    width: 20;
+    background: #161616;
+}
+
+#system-prompt-input {
+    height: 6;
+    background: #161616;
+    border: round #262626;
+}
+
+#save-settings {
+    width: auto;
+    margin-top: 1;
+    background: #3B0A10;
+    border: round #6B141C;
+    color: #FFFFFF;
+}
+
+.status-row {
+    height: auto;
+}
+
+.status-key {
+    width: 20;
+    color: #777777;
+}
+
+.status-value {
+    width: 1fr;
+    color: #FFFFFF;
+}
+
+/* --------------------------------------------------------- responsiveness */
+
+/* Textual 8 does not support @media queries: adapt through relative units.
+   The panel fills most of any terminal, paddings stay small on narrow ones. */
+
+.panel {
+    width: 90%;
+    min-width: 46;
+}
+
+#chat-view {
+    padding: 1 1;
+}
+
+.user-message .message-body,
+.assistant-status,
+.block-label,
+.metrics-footer,
+.error-box,
+.message-note {
+    margin-left: 1;
+}
+
+#answer-markdown {
+    margin-left: 2;
+}
+
+.reasoning-panel,
+.search-panel {
+    margin-left: 1;
+}
