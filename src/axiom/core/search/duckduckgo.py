@@ -7,6 +7,7 @@ is raised and the UI reports the real failure.
 
 from __future__ import annotations
 
+import html
 import re
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -40,7 +41,8 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _clean(fragment: str) -> str:
-    return re.sub(r"\s+", " ", unquote(_TAG_RE.sub("", fragment))).strip()
+    text = re.sub(r"\s+", " ", unquote(_TAG_RE.sub("", fragment)))
+    return html.unescape(text).strip()
 
 
 def _resolve_href(href: str) -> str:

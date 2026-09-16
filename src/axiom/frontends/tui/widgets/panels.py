@@ -31,7 +31,6 @@ from textual.widgets.option_list import Option
 from axiom.core.config import Config
 from axiom.core.history import Conversation
 from axiom.core.models import ModelInfo
-from axiom.frontends.tui.widgets.commands import COMMANDS
 from axiom.shared import formatting as fmt
 from axiom.shared import theme
 
@@ -139,7 +138,7 @@ class ModelPanel(PanelScreen):
             return
         try:
             self._models = list(await self._refresh_callback())
-        except Exception:  # noqa: BLE001 - a failed refresh keeps the old list
+        except Exception:
             return
         option_list = self.query_one("#model-list", OptionList)
         option_list.clear_options()
@@ -292,10 +291,16 @@ class HistoryPanel(PanelScreen):
 
 _BOOL_SETTINGS: tuple[tuple[str, str, str], ...] = (
     ("switch-search", "web_search_enabled", "Web search"),
-    ("switch-reasoning", "show_reasoning", "Show reasoning"),
+    ("switch-reasoning", "show_reasoning", "Show reasoning (when provided)"),
     ("switch-expanded", "reasoning_expanded", "Reasoning starts expanded"),
     ("switch-animations", "animations", "Animations"),
     ("switch-history", "save_history", "Save conversation history"),
+)
+
+_THINK_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("think-auto", "Thinking: auto (follow model capability)"),
+    ("think-on", "Thinking: on (always request)"),
+    ("think-off", "Thinking: off (never request)"),
 )
 
 
@@ -312,13 +317,37 @@ class SettingsPanel(PanelScreen):
         return "↑↓ navigate   ·   enter save   ·   esc close"
 
     def subtitle_lines(self) -> list[str]:
-        return [f"Stored at {Config.path()}"]
+        direct = self._config.system_prompt or "(model default)"
+        think = "auto" if self._config.think is None else ("on" if self._config.think else "off")
+        return [
+            f"Model {self._config.model or '(auto)'}  ·  {self._config.ollama_url}",
+            f"Web {'on' if self._config.web_search_enabled else 'off'}"
+            (
+                f"  ·  Thinking {think}  ·  Theme {self._config.theme}"
+            ),
+            f"Prompt: {direct[:64]}",
+        ]
 
     def body(self) -> ComposeResult:
         for switch_id, field_name, label in _BOOL_SETTINGS:
             with Horizontal(classes="settings-row"):
                 yield Static(label, classes="settings-label", markup=False)
                 yield Switch(getattr(self._config, field_name), id=switch_id)
+        yield Static("Thinking mode (Ollama think flag)", classes="settings-label", markup=False)
+        yield OptionList(
+            *[Option(label, id=option_id) for option_id, label in _THINK_OPTIONS],
+            id="think-list",
+        )
+        with Horizontal(classes="settings-row"):
+            yield Static("Ollama URL", classes="settings-label", markup=False)
+            yield Input(value=self._config.ollama_url, id="ollama-input")
+        with Horizontal(classes="settings-row"):
+            yield Static("Model (empty = auto)", classes="settings-label", markup=False)
+            yield Input(
+                value="" if not self._config.model else self._config.model,
+                placeholder="qwen3:8b",
+                id="model-input",
+            )
         with Horizontal(classes="settings-row"):
             yield Static("Temperature", classes="settings-label", markup=False)
             yield Input(
@@ -330,6 +359,30 @@ class SettingsPanel(PanelScreen):
         yield TextArea(self._config.system_prompt or "", id="system-prompt-input")
         yield Button("Save", id="save-settings", variant="default")
 
+    def on_mount(self) -> None:
+        current = (
+            "think-auto" if self._config.think is None else ("think-on" if self._config.think else "think-off")
+        )
+        option_list = self.query_one("#think-list", OptionList)
+        for index, option in enumerate(option_list._options):
+            if option.id == current:
+                option_list.highlighted = index
+                break
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        option_id = str(event.option.id or "")
+        if option_id == "think-auto":
+            self._config.think = None
+        elif option_id == "think-on":
+            self._config.think = True
+        elif option_id == "think-off":
+            self._config.think = False
+        else:
+            return
+        self._save()
+        if self.app is not None:
+            self.app.notify("Thinking mode saved.", title="Settings", timeout=3)
+
     def on_switch_changed(self, event: Switch.Changed) -> None:
         for switch_id, field_name, _ in _BOOL_SETTINGS:
             if event.switch.id == switch_id:
@@ -340,11 +393,19 @@ class SettingsPanel(PanelScreen):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "temperature-input":
             self._apply_temperature(event.input.value)
+        elif event.input.id == "model-input":
+            self._config.model = event.input.value.strip() or None
+            self._save()
+        elif event.input.id == "ollama-input":
+            self._config.ollama_url = event.input.value.strip() or self._config.ollama_url
+            self._save()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id != "save-settings":
             return
         self._apply_temperature(self.query_one("#temperature-input", Input).value)
+        self._config.model = self.query_one("#model-input", Input).value.strip() or None
+        self._config.ollama_url = self.query_one("#ollama-input", Input).value.strip() or self._config.ollama_url
         self._config.system_prompt = self.query_one("#system-prompt-input", TextArea).text.strip() or None
         self._save()
         if self.app is not None:
@@ -403,7 +464,19 @@ class StatusPanel(PanelScreen):
         return [server]
 
     def body(self) -> ComposeResult:
-        rows: list[tuple[str, str]] = [("Model", self._model.name if self._model else "none")]
+        connected = "connected" if self._version else "unknown (splash probe)"
+        thinking = self._model.supports("thinking") if self._model else None
+        thinking_text = (
+            "available" if thinking is True else ("unavailable" if thinking is False else "unknown")
+        )
+        rows: list[tuple[str, str]] = [
+            ("Ollama", f"{theme.DOT_ACTIVE} {connected}" if self._version else f"{theme.DOT_IDLE} {connected}"),
+            ("Endpoint", self._ollama_url),
+            ("Model", self._model.name if self._model else "none"),
+            ("Streaming", "on (NDJSON deltas)"),
+            ("Reasoning", thinking_text),
+            ("Web Search", "available (DuckDuckGo, key-less)"),
+        ]
         if self._model is not None:
             rows.append(("Label", self._model.display_name))
             rows.append(("Capabilities", capability_text(self._model)))

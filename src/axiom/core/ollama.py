@@ -20,12 +20,17 @@ This module is frontend-agnostic and imports no UI code.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 
-from axiom.core.errors import InvalidResponseError, ModelNotFoundError, OllamaUnavailableError
+from axiom.core.errors import (
+    InvalidResponseError,
+    ModelNotFoundError,
+    OllamaUnavailableError,
+)
 
 _DEFAULT_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 _PROBE_TIMEOUT = httpx.Timeout(4.0, connect=3.0)
@@ -266,8 +271,11 @@ class OllamaClient:
 
         parser = ChatStreamParser()
         try:
-            async with self._client() as client:
-                async with client.stream("POST", "/api/chat", json=payload) as response:
+            async with (
+                self._client() as client,
+                client.stream("POST", "/api/chat", json=payload) as response,
+            ):
+
                     if response.status_code == 404:
                         body = await response.aread()
                         raise ModelNotFoundError(_extract_error(body) or f"Model '{model}' not found.")

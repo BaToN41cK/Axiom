@@ -18,6 +18,7 @@ venv/
 # AXIOM local data
 .axiom/
 .smoke-home/
+.smoke/
 
 # OS
 Thumbs.db

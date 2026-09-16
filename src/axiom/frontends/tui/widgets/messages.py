@@ -1,6 +1,26 @@
-"""Message widgets — one container per exchange, driven strictly by core events."""
+"""Message widgets — one timeline per exchange, driven strictly by core events.
+
+Layout (AXIOM design language — minimal, premium, no fake blocks):
+
+    YOU  ·  14:02
+    └─ question text
+
+    AXIOM
+    ◌  thinking / searching / generating  (live status, always real)
+    ◌ THINKING · live reasoning deltas …            (only if model sent them)
+    ◉ WEB SEARCH · query …                           (only after ToolCallEvent)
+      ├─ Searching: …
+      ├─ Found N sources
+      └─ …
+    ⬢ TOOL · web_search · ok                         (only real tool events)
+    ◆ ANSWER
+      streamed markdown answer
+    ✓ Completed · 2.4s · 118 tok · 18.6 tok/s
+"""
 
 from __future__ import annotations
+
+from typing import Any
 
 from textual.containers import Container, VerticalScroll
 from textual.css.query import NoMatches
@@ -9,11 +29,10 @@ from textual.widgets._markdown import MarkdownStream
 
 from axiom.core.events import SourceItem
 from axiom.core.state import GenerationState
-from axiom.shared import formatting as fmt
-from axiom.shared import theme
-
 from axiom.frontends.tui.widgets.reasoning import ReasoningPanel
 from axiom.frontends.tui.widgets.search import WebSearchPanel
+from axiom.shared import formatting as fmt
+from axiom.shared import theme
 
 
 class UserMessage(Container):
@@ -32,7 +51,7 @@ class UserMessage(Container):
 
 
 class AssistantMessage(Container):
-    """An assistant turn: status, optional reasoning, search, answer, metrics."""
+    """An assistant turn: live status, optional reasoning, search, tool, answer."""
 
     def __init__(self, *, animations: bool = True, reasoning_expanded: bool = False) -> None:
         super().__init__(classes="message assistant-message")
@@ -46,6 +65,9 @@ class AssistantMessage(Container):
         self._timer = None
         self._reasoning: ReasoningPanel | None = None
         self._search: WebSearchPanel | None = None
+        self._tool_line: Static | None = None
+        self._tool_active = False
+        self._saw_thinking = False
         self._error_box: Static | None = None
         self._stream: MarkdownStream | None = None
         self.answering = False
@@ -54,7 +76,7 @@ class AssistantMessage(Container):
     def compose(self):
         yield Static("AXIOM", classes="role-label")
         yield Static("", id="assistant-status", classes="assistant-status")
-        yield Static("ANSWER", id="answer-label", classes="block-label")
+        yield Static(f"{theme.ANSWER_GLYPH} ANSWER", id="answer-label", classes="block-label")
         yield Markdown("", id="answer-markdown")
 
     def on_mount(self) -> None:
@@ -69,10 +91,22 @@ class AssistantMessage(Container):
     def set_state(self, state: GenerationState, *, detail: str | None = None) -> None:
         self._state = state
         self._active = state.is_busy
+        if state == GenerationState.THINKING:
+            self._saw_thinking = True
         if detail is not None:
             self._detail = detail
         if self._reasoning is not None:
-            self._reasoning.set_state(state, active=state.is_busy)
+            if state == GenerationState.THINKING:
+                self._reasoning.set_state(state, active=True)
+            elif self._reasoning.active:
+                # THINKING -> next phase: the reasoning really ended. Fold the
+                # panel away and leave the ✓ summary line (spec §5/§45).
+                if state in (GenerationState.ERROR, GenerationState.CANCELLED):
+                    self._reasoning.finish(state)
+                else:
+                    self._reasoning.complete()
+            else:
+                self._reasoning.set_state(state, active=state.is_busy)
         self._refresh_status()
 
     def _animate_status(self) -> None:
@@ -90,6 +124,28 @@ class AssistantMessage(Container):
             widget.display = False
             return
         widget.display = True
+        if self._state == GenerationState.ERROR and not self._active:
+            widget.update(f"{theme.CROSS}  Failed")
+            return
+        if self._active:
+            glyph = fmt.spinner_frame(self._tick)
+        elif self._state == GenerationState.COMPLETED:
+            glyph = theme.TICK
+        elif self._state == GenerationState.CANCELLED:
+            glyph = theme.INTERRUPTED
+        elif self._state == GenerationState.ERROR:
+            glyph = theme.CROSS
+        else:
+            glyph = theme.RING
+        if self._state == GenerationState.THINKING:
+            if self._reasoning is not None:
+                # The THINKING panel already carries this phase; rendering the
+                # status line too would show the user two "Thinking" rows.
+                widget.display = False
+                return
+            label = f"Thinking  {self._tick * 0.12:.1f}s" if self._tick else "Thinking"
+            widget.update(f"{glyph}  {label}")
+            return
         widget.update(
             fmt.status_line(
                 self._state.value,
@@ -117,28 +173,61 @@ class AssistantMessage(Container):
             self._timer = None
         if self._reasoning is not None:
             self._reasoning.finish(state, duration_ms)
+        else:
+            # No reasoning deltas arrived (or ANSWER streamed directly): say so
+            # exactly once — never invent fake thinking lines.
+            self._collapse_pending_thinking(state)
         if self._search is not None:
             self._search.finish(cancelled=state == GenerationState.CANCELLED)
+        if self._tool_line is not None and self._tool_active:
+            self.tool_finished("tool", False, "interrupted")
         self._refresh_status()
-        parts: list[str] = []
-        duration = fmt.format_duration_ms(duration_ms)
-        if duration:
-            parts.append(duration)
-        if tokens_out is not None:
-            parts.append(f"{fmt.format_tokens(tokens_out)} tok")
-        rate = fmt.format_rate(tokens_per_second)
-        if rate:
-            parts.append(rate)
-        if parts:
-            self.mount(Static("  ".join(parts), classes="metrics-footer", markup=False))
+        summary = fmt.completion_summary(
+            state,
+            duration_ms=duration_ms,
+            tokens_out=tokens_out,
+            rate=tokens_per_second,
+        )
+        if summary:
+            self.mount(Static(summary, classes="metrics-footer", markup=False))
+
+    def _collapse_pending_thinking(self, state: GenerationState) -> None:
+        """Render the honest 'no reasoning' note when the model sent none."""
+        if self.answering or state != GenerationState.COMPLETED:
+            return
+        # Only show when a thinking phase was actually observed; otherwise the
+        # status line already told the story (fast non-reasoning models).
+        if not self._saw_thinking:
+            return
+        self.mount(
+            Static(
+                f"{theme.RING}  Thinking unavailable  ·  model did not expose reasoning",
+                classes="message-note",
+                markup=False,
+            )
+        )
 
     # --------------------------------------------------------------- reasoning
+
+    def _anchor(self):
+        """Mount point keeping chronological order: reasoning → search/tool → answer."""
+        try:
+            return self.query_one("#answer-label", Static)
+        except Exception:  # pragma: no cover - compose in progress
+            return None
 
     def add_reasoning(self, text: str) -> None:
         if self._reasoning is None:
             self._reasoning = ReasoningPanel(expanded=self._expanded, animations=self._animations)
-            self.mount(self._reasoning, before=0)
+            anchor = self._anchor()
+            if anchor is not None:
+                self.mount(self._reasoning, before=anchor)
+            else:
+                self.mount(self._reasoning)
             self._reasoning.set_state(self._state, active=self._active)
+            # The panel now represents the THINKING phase; make sure the
+            # status line never duplicates it.
+            self._refresh_status()
         self._reasoning.append(text)
 
     @property
@@ -150,8 +239,48 @@ class AssistantMessage(Container):
     def _ensure_search(self) -> WebSearchPanel:
         if self._search is None:
             self._search = WebSearchPanel(animations=self._animations)
-            self.mount(self._search, before=0)
+            anchor = self._anchor()
+            if anchor is not None:
+                self.mount(self._search, before=anchor)
+            else:
+                self.mount(self._search)
         return self._search
+
+    # -------------------------------------------------------------------- tool
+
+    def tool_started(self, name: str, arguments: dict[str, Any] | None = None) -> None:
+        """Render a real tool invocation (chronological timeline block)."""
+        if self._tool_line is None:
+            self._tool_line = Static("", classes="tool-line", markup=False)
+            anchor = self._anchor()
+            if anchor is not None:
+                self.mount(self._tool_line, before=anchor)
+            else:
+                self.mount(self._tool_line)
+        self._tool_active = True
+        query = ""
+        if arguments:
+            for key in ("query", "url", "input", "text"):
+                value = arguments.get(key)
+                if isinstance(value, str) and value.strip():
+                    query = fmt.truncate(value.strip(), 72)
+                    break
+        suffix = f"  ·  {query}" if query else ""
+        self._tool_line.update(f"{theme.TOOL_GLYPH}  TOOL  ·  {name}{suffix}")
+
+    def tool_finished(self, name: str, ok: bool, detail: str = "") -> None:
+        if self._tool_line is None:
+            self.tool_started(name)
+            if self._tool_line is None:  # pragma: no cover - defensive
+                return
+        self._tool_active = False
+        glyph = theme.TICK if ok else theme.CROSS
+        suffix = f"  ·  {detail}" if detail else ""
+        self._tool_line.update(f"{glyph}  TOOL  ·  {name}{suffix}")
+        if name == "web_search" and ok and self._search is None:
+            # Model tool ran fine but SearchResultEvent not seen yet: keep the
+            # honest mark, the search panel will extend it when results land.
+            pass
 
     def search_started(self, query: str) -> None:
         self._ensure_search().search_started(query)
@@ -226,9 +355,7 @@ class ChatView(VerticalScroll):
 
     def watch_scroll_y(self, old_value: float | None, new_value: float) -> None:
         """Follow the tail while the user stays at the bottom."""
-        if self.max_scroll_y <= 0:
-            self._follow = True
-        elif new_value >= self.max_scroll_y - 2:
+        if self.max_scroll_y <= 0 or new_value >= self.max_scroll_y - 2:
             self._follow = True
         elif old_value is not None and new_value < old_value:
             self._follow = False

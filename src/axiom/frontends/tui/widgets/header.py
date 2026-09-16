@@ -16,10 +16,10 @@ from axiom.shared import theme
 
 
 class HeaderBar(Horizontal):
-    """``AXIOM  ·  Model  ·  Ollama version``."""
+    """``◆ AXIOM · Model · ● Ollama`` — premium identity, no noise."""
 
     def compose(self):
-        yield Static("AXIOM", id="header-brand", markup=False)
+        yield Static(f"{theme.DIAMOND}  AXIOM", id="header-brand", markup=False)
         yield Static("", id="header-model", markup=False)
         yield Static("", id="header-connection", markup=False)
 
@@ -28,7 +28,7 @@ class HeaderBar(Horizontal):
 
     def update_model(self, display_name: str) -> None:
         widget = self.query_one("#header-model", Static)
-        widget.update(f"{theme.ARROW}  {display_name}" if display_name else "")
+        widget.update(f"{display_name}" if display_name else "")
 
     def set_connection(self, available: bool, version: str | None) -> None:
         widget = self.query_one("#header-connection", Static)
@@ -39,7 +39,7 @@ class HeaderBar(Horizontal):
 
 
 class StatusBar(Static):
-    """``● Ollama · Model · Tokens · tok/s · State`` with a live spinner."""
+    """``Model │ Thinking │ Web ○ │ Tokens │ /help`` — live, minimal."""
 
     def __init__(self, **kwargs) -> None:
         super().__init__("", id="status-bar", markup=False, **kwargs)
@@ -51,6 +51,8 @@ class StatusBar(Static):
         self._rate: float | None = None
         self._available = False
         self._version: str | None = None
+        self._web_active = False
+        self._thinking: str | None = None
         self._timer = None
 
     def on_mount(self) -> None:
@@ -86,27 +88,40 @@ class StatusBar(Static):
         self._version = version
         self.refresh_status()
 
+    def set_web(self, active: bool) -> None:
+        self._web_active = active
+        self.refresh_status()
+
+    def set_thinking(self, available: bool | None) -> None:
+        if available is True:
+            self._thinking = "Thinking"
+        elif available is False:
+            self._thinking = "No thinking"
+        else:
+            self._thinking = None
+        self.refresh_status()
+
     # -------------------------------------------------------------------- render
 
     def refresh_status(self) -> None:
-        glyph = theme.DOT_ACTIVE if self._available else theme.DOT_IDLE
-        parts = [f"{glyph} Ollama"]
-        if self._version:
-            parts[-1] = f"{glyph} Ollama {self._version}"
+        parts: list[str] = []
         if self._model:
             parts.append(self._model)
+        if self._thinking is not None:
+            parts.append(self._thinking)
+        elif self._state == GenerationState.THINKING and self._state.is_busy:
+            parts.append(f"Thinking {fmt.spinner_frame(self._tick)}")
+        web_glyph = theme.DOT_ACTIVE if self._web_active else theme.DOT_IDLE
+        parts.append(f"Web {web_glyph}")
         if self._tokens is not None:
             parts.append(f"{fmt.format_tokens(self._tokens)} tok")
-        rate = fmt.format_rate(self._rate)
-        if rate and self._state.is_busy:
-            parts.append(rate)
-        if self._state is not GenerationState.IDLE:
-            parts.append(
-                fmt.status_line(
-                    self._state.value,
-                    tick=self._tick,
-                    detail=self._detail,
-                    active=self._state.is_busy,
-                )
-            )
-        self.update("   ·   ".join(parts))
+        elif self._state.is_busy and self._state is not GenerationState.IDLE:
+            rate = fmt.format_rate(self._rate)
+            if rate:
+                parts.append(rate)
+            state_label = fmt.status_label(self._state.value)
+            parts.append(f"{state_label} {fmt.spinner_frame(self._tick)}")
+        elif self._state is not GenerationState.IDLE:
+            parts.append(fmt.status_label(self._state.value))
+        parts.append("/help")
+        self.update(f"  {theme.SEPARATOR}  ".join(parts))

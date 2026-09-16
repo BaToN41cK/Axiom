@@ -12,6 +12,7 @@ import webbrowser
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.theme import Theme as TextualTheme
 
@@ -25,13 +26,12 @@ from axiom.core.events import (
     SearchResultEvent,
     SourceItem,
     StatusChange,
+    ToolCallEvent,
     ToolResultEvent,
 )
 from axiom.core.models import ModelRegistry
 from axiom.core.state import GenerationState
 from axiom.core.tools.web_search import FETCH_URL_TOOL, WEB_SEARCH_TOOL
-from axiom.shared import theme as palette
-
 from axiom.frontends.tui.widgets.commands import COMMANDS, find_command
 from axiom.frontends.tui.widgets.header import HeaderBar, StatusBar
 from axiom.frontends.tui.widgets.messages import AssistantMessage, ChatView, UserMessage
@@ -44,6 +44,7 @@ from axiom.frontends.tui.widgets.panels import (
 )
 from axiom.frontends.tui.widgets.prompt import InputBar
 from axiom.frontends.tui.widgets.splash import SplashScreen, StartupStep
+from axiom.shared import theme as palette
 
 
 class WorkspaceScreen(Screen):
@@ -51,6 +52,7 @@ class WorkspaceScreen(Screen):
 
     BINDINGS = [
         Binding("ctrl+c", "stop_generation", "Stop", priority=True),
+        Binding("escape", "stop_generation", "Stop", show=False),
     ]
 
     def __init__(
@@ -67,6 +69,8 @@ class WorkspaceScreen(Screen):
         self._generating = False
         self._read_queue: list[SourceItem] = []
         self._read_index = 0
+        self._history: list[str] = []
+        self._history_index: int = -1
 
     def compose(self) -> ComposeResult:
         yield HeaderBar()
@@ -120,10 +124,33 @@ class WorkspaceScreen(Screen):
             return
         if text.startswith("/"):
             self.input_bar.clear_prompt()
+            self._remember(text)
             self._execute_command(text)
             return
         self.input_bar.clear_prompt()
+        self._remember(text)
         self._start_generation(text)
+
+    def _remember(self, text: str) -> None:
+        if not text.strip():
+            return
+        if self._history and self._history[-1] == text:
+            self._history_index = -1
+            return
+        self._history.append(text)
+        if len(self._history) > 200:
+            self._history = self._history[-200:]
+        self._history_index = -1
+
+    def on_input_bar_history_recall(self, event: InputBar.HistoryRecall) -> None:
+        event.stop()
+        if not self._history:
+            return
+        # _history_index: -1 = fresh line, 0 = newest submitted, N = N steps older.
+        if self._history_index < len(self._history) - 1:
+            self._history_index += 1
+        position = len(self._history) - 1 - self._history_index
+        self.input_bar.input.set_prompt(self._history[position])
 
     def _start_generation(
         self,
@@ -166,29 +193,51 @@ class WorkspaceScreen(Screen):
                 await self._dispatch_event(assistant, event)
         finally:
             self._generating = False
-            self.input_bar.set_busy(False)
+            try:
+                self.input_bar.set_busy(False)
+            except NoMatches:  # pragma: no cover - teardown race
+                pass
             await assistant.close_stream()
             if not assistant.finished:
                 assistant.finish(GenerationState.ERROR)
-            self.status_bar.set_state(self.session.state)
-            self.input_bar.input.focus()
+            try:
+                self.status_bar.set_state(self.session.state)
+                self.input_bar.input.focus()
+            except NoMatches:  # pragma: no cover - teardown race
+                pass
 
     async def _dispatch_event(self, assistant: AssistantMessage, event: ChatEvent) -> None:
         """Project one real core event onto the widgets. No invention here."""
         if isinstance(event, StatusChange):
             assistant.set_state(event.state, detail=event.detail)
             self.status_bar.set_state(event.state, event.detail)
+            if event.state == GenerationState.SEARCHING:
+                self.status_bar.set_web(True)
+                assistant.search_started(event.detail or "")
             if event.detail == "read_source":
                 self._begin_source_read(assistant)
         elif isinstance(event, ReasoningChunk):
             assistant.add_reasoning(event.text)
+            self.status_bar.set_thinking(True)
         elif isinstance(event, ContentChunk):
             await assistant.add_answer(event.text)
+        elif isinstance(event, ToolCallEvent):
+            assistant.tool_started(event.name, event.arguments)
+            if event.name == WEB_SEARCH_TOOL:
+                self.status_bar.set_web(True)
         elif isinstance(event, SearchResultEvent):
             self._read_queue = list(event.sources)
             self._read_index = 0
             assistant.search_finished(event.query, event.sources)
+            self.status_bar.set_web(True)
         elif isinstance(event, ToolResultEvent):
+            if event.ok:
+                detail = f"{event.duration_ms} ms" if event.duration_ms else "ok"
+                assistant.tool_finished(event.name, True, detail)
+            else:
+                assistant.tool_finished(event.name, False, event.error or "Tool execution failed.")
+                if event.name == WEB_SEARCH_TOOL:
+                    self.status_bar.set_web(False)
             if event.name == WEB_SEARCH_TOOL and not event.ok:
                 assistant.search_failed(event.error or "Web search failed.")
             elif event.name == FETCH_URL_TOOL:
@@ -205,7 +254,8 @@ class WorkspaceScreen(Screen):
             )
             self.status_bar.set_state(event.state)
             self.status_bar.add_tokens(event.tokens_out, event.tokens_per_second)
-        # ToolCallEvent: the status line already reflects real tool activity.
+            if not event.state.is_busy:
+                self.status_bar.set_web(False)
 
     def _begin_source_read(self, assistant: AssistantMessage) -> None:
         if self._read_index < len(self._read_queue):
@@ -227,7 +277,7 @@ class WorkspaceScreen(Screen):
         event.stop()
         self._request_stop()
 
-    def on_axiom_input_submitted(self, event) -> None:
+    def on_input_bar_submitted(self, event: InputBar.Submitted) -> None:
         event.stop()
         self.handle_submit(event.value)
 
@@ -274,9 +324,16 @@ class WorkspaceScreen(Screen):
                     ),
                     callback=self._model_chosen,
                 )
-        elif name in ("/clear", "/new"):
+        elif name == "/clear":
+            # Clear the visible transcript only; stored history files are kept
+            # so /history still shows every conversation.
+            self.chat_view.clear_messages()
+            self.notify("Transcript cleared — history kept.", title="Clear", timeout=3)
+        elif name == "/new":
             self.session.new_conversation()
             self.chat_view.clear_messages()
+            self.status_bar.set_thinking(None)
+            self.notify("New conversation started.", title="New", timeout=3)
         elif name == "/history":
             self.app.push_screen(
                 HistoryPanel(self.session.history(), on_delete=self._delete_conversation),
@@ -308,7 +365,7 @@ class WorkspaceScreen(Screen):
     async def _switch_model(self, name: str) -> None:
         try:
             model = await self.session.switch_model(name)
-        except Exception as exc:  # noqa: BLE001 - surfaced as a clean notice
+        except Exception as exc:
             self.notify(str(exc), severity="error", timeout=6)
             return
         self._refresh_model_display()

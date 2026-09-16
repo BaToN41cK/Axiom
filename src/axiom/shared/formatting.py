@@ -7,7 +7,7 @@ functions so that the CLI, TUI and a future GUI render identical information.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from axiom.shared.theme import (
     CROSS,
@@ -28,7 +28,7 @@ def format_duration(seconds: float) -> str:
         seconds = 0.0
     if seconds < 60:
         return f"{seconds:.1f}s"
-    minutes, rest = divmod(int(round(seconds)), 60)
+    minutes, rest = divmod(round(seconds), 60)
     return f"{minutes}m {rest}s"
 
 
@@ -60,13 +60,13 @@ def format_rate(tokens_per_second: float | None) -> str:
 def format_clock(timestamp: float | None) -> str:
     if not timestamp:
         return ""
-    return datetime.fromtimestamp(timestamp).strftime("%H:%M")
+    return datetime.fromtimestamp(timestamp, tz=UTC).astimezone().strftime("%H:%M")
 
 
 def history_bucket(timestamp: float) -> str:
     """Group conversations into Today / Yesterday / date labels."""
-    moment = datetime.fromtimestamp(timestamp).date()
-    today = datetime.now().date()
+    moment = datetime.fromtimestamp(timestamp, tz=UTC).astimezone().date()
+    today = datetime.now().astimezone().date()
     if moment == today:
         return "Today"
     if moment == today - timedelta(days=1):
@@ -132,25 +132,60 @@ def status_line(
     detail: str | None = None,
     active: bool = False,
 ) -> str:
-    """Compose ``Thinking ◌`` / ``Thinking ✓ 4.8s`` style status text.
+    """Compose ``◌ Thinking`` / ``◉ Searching web`` / ``✓ Completed · 4.8s`` text.
 
     Renders only what the state machine actually reported — it never invents
     progress or a duration.
     """
     label = status_label(state_value)
     failed = state_value == "error"
-    done = not active and not failed and state_value not in ("idle",)
+    cancelled = state_value == "cancelled"
+    done = not active and not failed and not cancelled and state_value not in ("idle",)
     if active and not failed:
         glyph = spinner_frame(tick)
     else:
         glyph = status_glyph(state_value, done=done, failed=failed)
-    parts = [f"{label} {glyph}"]
+    parts = [f"{glyph}  {label}"]
     duration = format_duration_ms(duration_ms)
     if duration:
         parts.append(duration)
     if detail:
         parts.append(f"· {detail}")
     return "  ".join(parts)
+
+
+def completion_summary(
+    state,
+    *,
+    duration_ms: int | None = None,
+    tokens_out: int | None = None,
+    rate: float | None = None,
+) -> str:
+    """Final one-line receipt: ``✓ Completed · 2.8s · 118 tok · 18.6 tok/s``.
+
+    Never claims completion for non-final or failed states.
+    """
+    from axiom.shared.theme import CROSS, INTERRUPTED, TICK  # local: avoid cycle
+
+    value = getattr(state, "value", state)
+    duration = format_duration_ms(duration_ms)
+    if value == "completed":
+        head = f"{TICK}  Completed"
+    elif value == "cancelled":
+        head = f"{INTERRUPTED}  Interrupted"
+    elif value == "error":
+        head = f"{CROSS}  Failed"
+    else:  # pragma: no cover - only final states reach the footer
+        return ""
+    parts = [head]
+    if duration:
+        parts.append(duration)
+    if tokens_out is not None:
+        parts.append(f"{format_tokens(tokens_out)} tok")
+    rendered_rate = format_rate(rate)
+    if rendered_rate:
+        parts.append(rendered_rate)
+    return "  ·  ".join(parts)
 
 
 def message_roles() -> dict[str, str]:

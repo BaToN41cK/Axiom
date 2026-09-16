@@ -18,6 +18,7 @@ from queue import Empty, Queue
 from tkinter import ttk
 
 from axiom.core.chat import ChatSession
+from axiom.core.errors import AxiomError
 from axiom.core.events import (
     ContentChunk,
     Done,
@@ -29,10 +30,10 @@ from axiom.core.events import (
     ToolResultEvent,
 )
 from axiom.core.models import ModelRegistry
+from axiom.core.tools.web_search import FETCH_URL_TOOL, WEB_SEARCH_TOOL
 from axiom.shared import formatting as fmt
 from axiom.shared import logo as logo_art
 from axiom.shared import theme as palette
-from axiom.core.tools.web_search import FETCH_URL_TOOL, WEB_SEARCH_TOOL
 
 POLL_MS = 40
 SPIN_MS = int(palette.SPINNER_INTERVAL * 1000)
@@ -235,6 +236,11 @@ class AssistantBlock(tk.Frame):
         if self.finished and self._state == "completed" and self.answering:
             self.status.configure(text="")
             return
+        if self._state == "thinking" and self._has_thinking:
+            # The THINKING toggle already carries this phase; a second status
+            # line would show the user two "Thinking" rows.
+            self.status.configure(text="")
+            return
         self.status.configure(
             text=fmt.status_line(
                 self._state,
@@ -320,6 +326,11 @@ class AssistantBlock(tk.Frame):
         self._state = state_value
         self._duration_ms = duration_ms
         self.search.finish()
+        # Fold the live reasoning away: thinking is a temporary live-view,
+        # the toggle summary (▸ Thinking · duration) stays.
+        if self._has_thinking and self._open:
+            self._open = False
+            self.thinking.pack_forget()
         self.refresh_status()
         self._refresh_toggle()
         parts: list[str] = []
@@ -548,7 +559,7 @@ class AxiomTk:
             q.put(("startup_ok",))
         except AxiomError as exc:
             q.put(("startup_fail", str(exc), exc.hint or ""))
-        except Exception as exc:  # noqa: BLE001 - never crash the UI thread
+        except Exception as exc:
             q.put(("startup_fail", f"{type(exc).__name__}: {exc}", ""))
 
     # ---------------------------------------------------------------- workspace
@@ -643,7 +654,7 @@ class AxiomTk:
         try:
             model = await self.session.switch_model(name)
             self.events.put(("model_switched", model.display_name))
-        except Exception as exc:  # noqa: BLE001 - surfaced as a note
+        except Exception as exc:
             self.events.put(("model_switch_failed", f"{type(exc).__name__}: {exc}"))
 
     # ------------------------------------------------------------------ scrolling
@@ -690,7 +701,7 @@ class AxiomTk:
     def _open_url(self, url: str) -> None:
         try:
             webbrowser.open(url)
-        except Exception:  # noqa: BLE001 - browser failure must not break the UI
+        except Exception:
             pass
 
     def _render_conversation(self, conversation) -> None:
@@ -789,7 +800,7 @@ class AxiomTk:
                 self.events.put(("event", event))
         except AxiomError as exc:
             self.events.put(("event", ErrorEvent(message=str(exc), kind=exc.kind, hint=exc.hint)))
-        except Exception as exc:  # noqa: BLE001 - the UI must never die on this thread
+        except Exception as exc:
             self.events.put((
                 "event",
                 ErrorEvent(message=f"{type(exc).__name__}: {exc}", kind="internal"),
@@ -1116,7 +1127,7 @@ class AxiomTk:
     def _on_close(self) -> None:
         try:
             self.session.cancel()
-        except Exception:  # noqa: BLE001 - shutdown must never hang
+        except Exception:
             pass
         self.root.destroy()
 

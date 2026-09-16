@@ -78,6 +78,10 @@ def _build_config(args: argparse.Namespace) -> Config:
         config.model = args.model
     if args.no_search:
         config.web_search_enabled = False
+    elif args.search:
+        # -s explicitly demands a search for this run: it must work even when
+        # the stored setting disables it.
+        config.web_search_enabled = True
     if args.think == "on":
         config.think = True
     elif args.think == "off":
@@ -229,7 +233,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         _err(_style("\n✕ Cancelled", theme.WARNING))
         return EXIT_INTERRUPTED
-    except Exception as exc:  # noqa: BLE001 - the CLI must never print a traceback
+    except Exception as exc:
         _err(_style(f"✕ {type(exc).__name__}: {exc}", theme.ERROR, bold=True))
         return EXIT_ERROR
 

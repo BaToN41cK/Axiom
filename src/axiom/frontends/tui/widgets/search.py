@@ -52,7 +52,7 @@ class WebSearchPanel(Container):
         self._timer = None
 
     def compose(self):
-        yield Static("WEB SEARCH", classes="block-label")
+        yield Static(f"{theme.SEARCH_GLYPH}  {theme.PHASE_SEARCH}", classes="phase-title")
         yield Static("", id="search-steps", markup=False)
         yield ListView(id="search-sources")
 
@@ -119,24 +119,29 @@ class WebSearchPanel(Container):
             return
         lines: list[str] = []
         if self._error and not self._sources:
-            lines.append(f"{theme.CROSS} Search  {self._error}")
+            lines.append(f"{theme.TREE_LAST}  {self._error}")
         elif self._searching:
-            lines.append(f"{fmt.spinner_frame(self._tick)} Searching  {fmt.truncate(self._query, 70)}")
+            lines.append(f"{theme.TREE_BRANCH}  Searching: {fmt.truncate(self._query, 70)}")
         elif self._sources:
             lines.append(
-                f"{theme.TICK} Search  {fmt.truncate(self._query, 60)}  ·  {len(self._sources)} sources"
+                f"{theme.TREE_BRANCH}  Found {len(self._sources)} sources  ·  {fmt.truncate(self._query, 52)}"
             )
         elif self._query:
-            lines.append(f"{theme.CROSS} Search  {fmt.truncate(self._query, 70)}  ·  no results")
+            lines.append(f"{theme.TREE_LAST}  No results  ·  {fmt.truncate(self._query, 70)}")
 
         active_reads = sum(1 for v in self._reading.values() if v == "active")
         total_reads = self._read_done + self._read_failed + active_reads
         if total_reads:
             if active_reads:
-                lines.append(f"{fmt.spinner_frame(self._tick)} Reading sources  ·  {self._read_done}/{total_reads}")
+                for url, state in self._reading.items():
+                    if state != "active":
+                        continue
+                    host = url.split("//", 1)[-1].split("/", 1)[0][:48] or url[:48]
+                    lines.append(f"{theme.TREE_BRANCH}  Reading: {host}")
+                    break
             else:
                 failed = f"  ·  {self._read_failed} failed" if self._read_failed else ""
-                lines.append(f"{theme.TICK} Reading sources  ·  {self._read_done}/{total_reads}{failed}")
+                lines.append(f"{theme.TREE_LAST}  Sources ready{failed}")
         steps.update("\n".join(lines))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:

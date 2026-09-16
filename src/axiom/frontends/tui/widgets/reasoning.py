@@ -7,6 +7,8 @@ core's state machine.
 
 from __future__ import annotations
 
+import time
+
 from textual.containers import Container
 from textual.widgets import Collapsible, Static
 
@@ -60,6 +62,7 @@ class ReasoningPanel(Container):
         self._duration_ms: int | None = None
         self._timer = None
         self._pending: list[str] = []
+        self._started: float | None = None
 
     def compose(self):
         collapsed = not self._expanded
@@ -70,6 +73,11 @@ class ReasoningPanel(Container):
             expanded_symbol="▾",
             id="reasoning-collapsible",
         ):
+            yield Static(
+                f"{theme.TREE_PIPE}  live model reasoning — plain text, not formatted",
+                classes="phase-note",
+                markup=False,
+            )
             yield StreamText(id="reasoning-text")
 
     def on_mount(self) -> None:
@@ -83,6 +91,8 @@ class ReasoningPanel(Container):
     # ------------------------------------------------------------------ public
 
     def append(self, text: str) -> None:
+        if self._started is None:
+            self._started = time.perf_counter()
         try:
             stream = self.query_one("#reasoning-text", StreamText)
         except Exception:  # pragma: no cover - composed lazily
@@ -90,26 +100,56 @@ class ReasoningPanel(Container):
             return
         stream.append(text)
 
+    @property
+    def active(self) -> bool:
+        """Whether reasoning is still streaming."""
+        return self._active
+
     def set_state(self, state: GenerationState, *, active: bool) -> None:
         """Track the real state so the title never claims more than it knows."""
+        if not self._active:
+            # Reasoning already finished; only a real interruption re-titles
+            # the (collapsed) summary line.
+            if state in (GenerationState.CANCELLED, GenerationState.ERROR):
+                self._state = state.value
+                self._refresh_title()
+            return
         self._state = state.value
         self._active = active
         self._refresh_title()
 
-    def finish(self, state: GenerationState, duration_ms: int | None) -> None:
-        self._state = state.value
-        self._active = False
-        self._duration_ms = duration_ms
+    def complete(self) -> None:
+        """Reasoning really ended (THINKING -> next phase): ✓ + collapse."""
+        self.finish(GenerationState.COMPLETED)
+
+    def finish(self, state: GenerationState, duration_ms: int | None = None) -> None:
+        """Finalize with the real terminal state and fold the live text away."""
+        if self._active:
+            if duration_ms is None and self._started is not None:
+                duration_ms = int((time.perf_counter() - self._started) * 1000)
+            self._duration_ms = duration_ms
+            self._state = state.value
+            self._active = False
+        elif state in (GenerationState.CANCELLED, GenerationState.ERROR):
+            self._state = state.value
         self._refresh_title()
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
+        self._collapse()
 
     def toggle(self) -> None:
         collapsible = self.query_one("#reasoning-collapsible", Collapsible)
         collapsible.collapsed = not collapsible.collapsed
 
     # ----------------------------------------------------------------- private
+
+    def _collapse(self) -> None:
+        """Fold the live reasoning away; the ✓ title summary stays."""
+        try:
+            self.query_one("#reasoning-collapsible", Collapsible).collapsed = True
+        except Exception:  # pragma: no cover - widget not composed yet
+            pass
 
     def _animate_title(self) -> None:
         if not self._active:
@@ -118,20 +158,16 @@ class ReasoningPanel(Container):
         self._refresh_title()
 
     def _title(self) -> str:
-        label = fmt.status_label(self._state) or "Thinking"
-        if self._active and self._state == GenerationState.THINKING.value:
-            label = "Thinking"
         if self._active:
             glyph = fmt.spinner_frame(self._tick)
-        elif self._state == GenerationState.ERROR.value:
-            glyph = theme.CROSS
-        else:
-            glyph = theme.TICK
-        parts = [f"{label} {glyph}"]
+            return f"{glyph}  {theme.PHASE_THINKING}"
+        if self._state == GenerationState.ERROR.value:
+            return f"{theme.CROSS}  {theme.PHASE_THINKING}"
+        if self._state == GenerationState.CANCELLED.value:
+            return f"{theme.INTERRUPTED}  {theme.PHASE_THINKING}"
         duration = fmt.format_duration_ms(self._duration_ms)
-        if duration:
-            parts.append(duration)
-        return "  ".join(parts)
+        suffix = f"  ·  {duration}" if duration else ""
+        return f"{theme.TICK}  {theme.PHASE_THINKING}{suffix}"
 
     def _refresh_title(self) -> None:
         try:

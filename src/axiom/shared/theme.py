@@ -6,6 +6,8 @@ same identity, and the TUI adapts these values into a Textual theme.
 
 from __future__ import annotations
 
+from typing import Any
+
 # --------------------------------------------------------------------- palette
 # Absolute black, deep obsidian burgundy accents, ash greys. Garnet is used
 # sparingly: active states, logo, selection, progress, thin separators.
@@ -45,10 +47,20 @@ ACCENT_STYLE = f"bold {GARNET_GLOW}"
 PROMPT_GLYPH = "❯"
 TICK = "✓"
 CROSS = "✕"
+INTERRUPTED = "■"
 DOT_ACTIVE = "●"
 DOT_IDLE = "○"
 ARROW = "›"
 BULLET = "·"
+DIAMOND = "◆"
+RING = "◌"
+SEARCH_GLYPH = "◉"
+TOOL_GLYPH = "⬢"
+ANSWER_GLYPH = "◆"
+TREE_BRANCH = "├─"
+TREE_LAST = "└─"
+TREE_PIPE = "│"
+SEPARATOR = "│"
 
 #: Smooth spinner — deliberately round, never ASCII noise.
 SPINNER_FRAMES = ("◌", "◔", "◑", "◕")
@@ -92,10 +104,18 @@ THEME_DARK = True
 #: How much Textual is allowed to spread the palette's luminosity.
 THEME_LUMINOSITY_SPREAD = 0.12
 
+#: Live phase titles — the timeline vocabulary of the AXIOM design language.
+PHASE_THINKING = "THINKING"
+PHASE_SEARCH = "WEB SEARCH"
+PHASE_TOOL = "TOOL"
+PHASE_ANSWER = "ANSWER"
+PHASE_SOURCES = "SOURCES"
+
 #: The theme registered with Textual (keys match textual.theme.Theme fields).
-#: Declared as ``object`` because the palette mixes strings and scalars; the TUI
-#: is the only place that adapts these values into a ``textual.theme.Theme``.
-THEME_COLORS: dict[str, object] = {
+#: Values are typed as ``Any`` because Textual expects a mix of ``str``,
+#: ``bool`` and ``float``; the TUI is the only place that adapts these
+#: values into a ``textual.theme.Theme``.
+THEME_COLORS: dict[str, Any] = {
     "name": "obsidian",
     "primary": GARNET_GLOW,
     "secondary": GARNET,

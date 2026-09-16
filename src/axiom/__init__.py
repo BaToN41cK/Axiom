@@ -39,11 +39,11 @@ __all__ = [
     # core
     "ChatSession",
     "Config",
-    "ModelInfo",
-    "ModelRegistry",
     "GenerationState",
     "GenerationStateMachine",
     "Message",
+    "ModelInfo",
+    "ModelRegistry",
     # events
     "ChatEvent",
     "ContentChunk",

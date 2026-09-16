@@ -49,3 +49,36 @@ axiom = ["frontends/tui/*.tcss"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "DTZ", "ISC", "FLY"]
+ignore = [
+    # Broad exception handling in UI widgets is intentional: rendering must
+    # never crash the app on unexpected data.
+    "BLE001",
+    # Textual uses mutable class attributes as reactive/attribute defaults.
+    "RUF012",
+    # Best-effort cleanup blocks: silence is acceptable there.
+    "S110",
+    # Same intent: silent fallbacks.
+    "SIM105",
+    # Project prefers explicit if/else blocks over dense ternaries.
+    "SIM108",
+    # Box-drawing glyphs and typographic separators are intentional.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # Enum-to-StrEnum migration is left for a later pass.
+    "UP042",
+    # Keys-hint blocks read better as joined literal lists.
+    "FLY002",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Grouped-with-comments __all__ blocks are kept intentionally unsorted.
+"src/axiom/__init__.py" = ["RUF022"]
+# The CLI shim import must run before the guarded module lookups.
+"tests/frontends/test_cli.py" = ["E402"]

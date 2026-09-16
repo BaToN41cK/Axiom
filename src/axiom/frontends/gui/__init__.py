@@ -8,7 +8,8 @@ render :data:`axiom.core.events.ChatEvent` without touching ``axiom.core``.
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Protocol
+from collections.abc import AsyncIterator
+from typing import Protocol
 
 from axiom.core.chat import ChatSession
 from axiom.core.events import ChatEvent

@@ -1,7 +1,7 @@
 """The AXIOM agent loop.
 
     USER → CONTEXT → MODEL → THINKING → DECISION
-         → (TOOL / SEARCH) → TOOL RESULT → MODEL → FINAL ANSWER
+        → (TOOL / SEARCH) → TOOL RESULT → MODEL → FINAL ANSWER
 
 Everything emitted here is driven by real backend activity: statuses are
 transitions of :class:`~axiom.core.state_machine.GenerationStateMachine`,
@@ -12,8 +12,8 @@ only when a real search provider returned them.
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import AsyncIterator
 
 from axiom.core.config import Config
 from axiom.core.events import (
@@ -115,6 +115,11 @@ class Agent:
         return schemas or None
 
     @staticmethod
+    def _int_or_none(value) -> int | None:
+        """Pass real ints through, map anything else to ``None``."""
+        return value if isinstance(value, int) else None
+
+    @staticmethod
     def _metrics(metrics: dict, started: float) -> dict:
         """Normalise Ollama metrics into UI-friendly values."""
         eval_count = metrics.get("eval_count")
@@ -125,7 +130,7 @@ class Agent:
         return {
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "tokens_out": eval_count if isinstance(eval_count, int) else None,
-            "tokens_in": metrics.get("prompt_eval_count") if isinstance(metrics.get("prompt_eval_count"), int) else None,
+            "tokens_in": Agent._int_or_none(metrics.get("prompt_eval_count")),
             "tokens_per_second": per_second,
         }
 
@@ -171,11 +176,17 @@ class Agent:
         self, call: ToolCallRequest
     ) -> AsyncIterator[ChatEvent]:
         """Execute a model-requested tool and report the real outcome."""
+        if call.name == WEB_SEARCH_TOOL:
+            # The UI shows this detail to the user — it must be the real
+            # query, not the tool name.
+            detail = str(call.arguments.get("query") or call.name)
+        else:
+            detail = call.name
         status = self._status(
             GenerationState.SEARCHING
             if call.name == WEB_SEARCH_TOOL
             else GenerationState.TOOL_CALL,
-            detail=call.name,
+            detail=detail,
         )
         if status:
             yield status

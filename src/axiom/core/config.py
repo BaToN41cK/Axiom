@@ -54,7 +54,7 @@ class Config(BaseModel):
         return axiom_home() / "config.json"
 
     @classmethod
-    def load(cls) -> "Config":
+    def load(cls) -> Config:
         """Load configuration, falling back to defaults on any problem.
 
         A corrupt or unreadable config file must never crash the application.

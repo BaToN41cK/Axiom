@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import AsyncIterator
 
 from axiom.core.agent import Agent
 from axiom.core.config import Config
-from axiom.core.errors import AxiomError, GenerationCancelledError, OllamaUnavailableError
+from axiom.core.errors import (
+    AxiomError,
+)
 from axiom.core.events import (
     ChatEvent,
     ContentChunk,
@@ -283,7 +285,7 @@ class ChatSession:
         self.machine.transition(target)
         return StatusChange(state=target)
 
-    def _final_status_to(self, queue: "asyncio.Queue[ChatEvent | None]", target: GenerationState) -> None:
+    def _final_status_to(self, queue: asyncio.Queue[ChatEvent | None], target: GenerationState) -> None:
         metrics = dict(getattr(self.agent, "metrics", {}) or {})
         status = self._final_status(target)
         if status:
@@ -329,7 +331,7 @@ class ChatSession:
     async def _produce(
         self,
         text: str,
-        queue: "asyncio.Queue[ChatEvent | None]",
+        queue: asyncio.Queue[ChatEvent | None],
         *,
         force_search: bool,
         search_query: str | None,
@@ -381,7 +383,7 @@ class ChatSession:
         except AxiomError as exc:
             queue.put_nowait(ErrorEvent(message=str(exc), kind=exc.kind, hint=exc.hint))
             self._final_status_to(queue, GenerationState.ERROR)
-        except Exception as exc:  # noqa: BLE001 - never leak a traceback into the UI
+        except Exception as exc:
             queue.put_nowait(
                 ErrorEvent(
                     message=f"{type(exc).__name__}: {exc}",

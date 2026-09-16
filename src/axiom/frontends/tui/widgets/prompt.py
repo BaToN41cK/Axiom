@@ -7,12 +7,11 @@ from textual.containers import Container, Horizontal
 from textual.message import Message
 from textual.widgets import OptionList, Static, TextArea
 
+from axiom.frontends.tui.widgets.commands import Command, CommandMenu
 from axiom.shared import theme
 
-from axiom.frontends.tui.widgets.commands import Command, CommandMenu
-
-HINT_IDLE = "Enter send   ·   Ctrl+J newline   ·   / commands   ·   Ctrl+Q quit"
-HINT_BUSY = "Ctrl+C stop   ·   Esc dismiss"
+HINT_IDLE = "Enter send · Ctrl+J newline · ↑↓ history · / commands · Esc stop · Ctrl+Q quit"
+HINT_BUSY = "Streaming · Esc / Ctrl+C stop"
 
 
 class AxiomInput(TextArea):
@@ -37,7 +36,7 @@ class AxiomInput(TextArea):
             **kwargs,
         )
 
-    async def _on_key(self, event: events.Key) -> None:  # noqa: D401 - documented above
+    async def _on_key(self, event: events.Key) -> None:
         # TextArea consumes Enter internally, so it must be intercepted here.
         if event.key == "enter":
             event.stop()
@@ -77,6 +76,20 @@ class InputBar(Container):
 
     class StopRequested(Message):
         """The Stop control was activated."""
+
+    class Submitted(Message):
+        """The prompt text was submitted (Enter or exact command)."""
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+            super().__init__()
+
+    class HistoryRecall(Message):
+        """Arrow-key history navigation was requested."""
+
+        def __init__(self, direction: int) -> None:
+            self.direction = direction
+            super().__init__()
 
     def compose(self):
         yield CommandMenu()
@@ -122,12 +135,28 @@ class InputBar(Container):
             self.query_one(CommandMenu).show_for(event.text_area.text)
 
     def on_axiom_input_submitted(self, event: AxiomInput.Submitted) -> None:
-        """Use Enter as command completion while the menu is open."""
-        menu = self.query_one(CommandMenu)
-        command = menu.highlighted_command() if menu.open else None
-        if command is not None:
-            event.stop()
-            self.complete(command)
+        """Enter submits; Tab completes — the menu never hijacks Enter."""
+        menu: CommandMenu = self.query_one(CommandMenu)
+        text = self.input.text.strip()
+        event.stop()  # AxiomInput.Submitted never propagates past the input bar.
+
+        if menu.open and text.startswith("/") and " " not in text.strip():
+            token = text.split(" ", 1)[0]
+            command = menu.highlighted_command()
+            if command is not None:
+                if command.name == token:
+                    # Exact match with the highlighted command → execute it.
+                    self.query_one(CommandMenu).hide()
+                    self.post_message(self.Submitted(text))
+                    return
+                # Partial token like /sea → complete to /search, keep typing.
+                self.complete(command)
+                return
+            # Unknown token while the menu is open → close it and submit.
+            menu.hide()
+
+        # Plain text or a command typed without the menu open.
+        self.post_message(self.Submitted(text))
 
     def on_key(self, event: events.Key) -> None:
         menu = self.query_one(CommandMenu)
@@ -138,18 +167,26 @@ class InputBar(Container):
                 event.stop()
                 event.prevent_default()
                 self.complete(command)
-        elif event.key == "escape" and menu.open:
-            event.stop()
-            self.query_one(CommandMenu).hide()
-        elif event.key == "down" and menu.open:
+        elif event.key == "escape":
+            if menu.open:
+                event.stop()
+                self.query_one(CommandMenu).hide()
+            else:
+                # Esc during streaming cancels the generation (handled by app).
+                self.post_message(self.StopRequested())
+        elif event.key in ("down", "up") and menu.open:
             # arrows navigate the command menu while the caret stays in the input
             event.stop()
             event.prevent_default()
-            option_list.action_cursor_down()
-        elif event.key == "up" and menu.open:
+            if event.key == "down":
+                option_list.action_cursor_down()
+            else:
+                option_list.action_cursor_up()
+        elif event.key in ("up", "down") and not self.input.text.strip():
+            # Empty prompt + ↑/↓ → recall previous/next submitted message.
             event.stop()
             event.prevent_default()
-            option_list.action_cursor_up()
+            self.post_message(self.HistoryRecall(+1 if event.key == "up" else -1))
 
     def on_click(self, event) -> None:
         widget = event.widget if hasattr(event, "widget") else None

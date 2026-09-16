@@ -7,7 +7,7 @@ this vocabulary.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -102,13 +102,13 @@ class Done(BaseModel):
     tokens_per_second: float | None = None
 
 
-ChatEvent = Union[
-    ReasoningChunk,
-    ContentChunk,
-    ToolCallEvent,
-    ToolResultEvent,
-    SearchResultEvent,
-    StatusChange,
-    ErrorEvent,
-    Done,
-]
+ChatEvent = (
+    ReasoningChunk
+    | ContentChunk
+    | ToolCallEvent
+    | ToolResultEvent
+    | SearchResultEvent
+    | StatusChange
+    | ErrorEvent
+    | Done
+)

@@ -111,7 +111,7 @@ class SplashScreen(Screen):
             await container.mount(line)
             try:
                 ok, note = await step.run()
-            except Exception as exc:  # noqa: BLE001 - a failed probe must be shown
+            except Exception as exc:
                 ok, note = False, f"{type(exc).__name__}: {exc}"
             self._active_line = None
             self._active_title = None

@@ -73,7 +73,7 @@ class ToolRegistry:
             result = ToolResult(name=name, ok=False, error=str(exc))
         except TypeError as exc:
             result = ToolResult(name=name, ok=False, error=f"Invalid arguments: {exc}")
-        except Exception as exc:  # noqa: BLE001 - tools must never crash the agent
+        except Exception as exc:
             result = ToolResult(name=name, ok=False, error=f"{type(exc).__name__}: {exc}")
         result.name = name
         result.duration_ms = int((time.perf_counter() - started) * 1000)

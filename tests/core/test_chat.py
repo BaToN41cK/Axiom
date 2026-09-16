@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,11 @@ from axiom.core.config import Config
 from axiom.core.events import ContentChunk, Done, ErrorEvent, ReasoningChunk
 from axiom.core.history import HistoryStore
 from axiom.core.models import ModelInfo
-from axiom.core.ollama import StreamChunk
+from axiom.core.ollama import OllamaClient, StreamChunk
 from axiom.core.state import GenerationState
 
 
-class FakeClient:
+class FakeClient(OllamaClient):
     """Minimal OllamaClient double driven by a scripted chunk list."""
 
     def __init__(
@@ -25,14 +26,10 @@ class FakeClient:
         base_url: str = "http://127.0.0.1:11434",
         block: asyncio.Event | None = None,
     ) -> None:
+        super().__init__(base_url)
         self._chunks = chunks or []
         self._block = block
-        self._base_url = base_url
         self.chat_calls: list[dict[str, Any]] = []
-
-    @property
-    def base_url(self) -> str:
-        return self._base_url
 
     async def is_available(self) -> bool:
         return True
@@ -43,8 +40,15 @@ class FakeClient:
     async def list_models(self) -> list[dict[str, Any]]:
         return [{"name": "test-model:latest", "details": {}, "capabilities": []}]
 
-    async def chat(self, model: str, messages: list[dict], **kwargs: Any):
-        self.chat_calls.append({"model": model, "messages": messages, **kwargs})
+    async def chat(  # type: ignore[override]
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        think: bool | None = None,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        self.chat_calls.append({"model": model, "messages": messages, "think": think, "tools": tools})
         if self._block is not None:
             await self._block.wait()
         for chunk in self._chunks:
