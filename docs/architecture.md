@@ -61,8 +61,7 @@ src/axiom/
 │   └── search/            ← provider (ABC) / duckduckgo
 ├── frontends/
 │   ├── tui/               ← Textual: app.py + widgets/ + theme.tcss
-│   ├── cli/               ← one-shot / pipe / --json
-│   └── gui/               ← пустой контракт (GuiBackend protocol)
+│   └── gui/               ← лаунчер `axiom --gui` (main.py), само приложение в desktop/
 └── shared/                ← данные для всех фронтендов: theme, logo, formatting
 ```
 

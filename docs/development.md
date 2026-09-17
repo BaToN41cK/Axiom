@@ -14,7 +14,6 @@ pip install -e ".[dev]"
 ```bash
 axiom                     # TUI
 axiom --gui               # десктопный GUI (Tauri-приложение в desktop/)
-axiom -p "ping"           # CLI
 pytest                    # тесты
 ```
 
@@ -23,7 +22,7 @@ pytest                    # тесты
 1. **Один пакет** — `axiom`, всё внутри `src/axiom/` (src-layout).
 2. **`core/` не импортирует UI** — ни `textual`, ни `rich`, ни `pyqt`.
    Контролируется тестом `tests/core/test_no_ui_imports.py`.
-3. **Фронтенды не импортируют друг друга** — `tui` не знает про `cli`.
+3. **Фронтенды не импортируют друг друга** — `tui` не знает про `gui`.
 4. **`shared/` — только данные**: палитра, глифы, логотип, форматтеры.
    Никакого I/O и состояния.
 5. **`__main__.py` — единственное место выбора фронтенда.**
@@ -61,7 +60,6 @@ tests/core/test_send_config.py     temperature/system/vision доезжают д
 tests/core/test_pasted_links.py    ссылки читаются без tool-calling
 tests/core/test_tools_registry.py  permissions, неизвестный tool, исключения
 tests/core/test_no_ui_imports.py   core не тянет UI-фреймворки
-tests/frontends/test_cli.py        -p / --json / pipe
 tests/live/test_ollama_live.py     живой Ollama (opt-in: AXIOM_LIVE_OLLAMA=1)
 ```
 
@@ -93,7 +91,7 @@ registry.register(definition, my_handler)
 
 Контракт — :class:`~axiom.core.chat.ChatSession`: конструктор принимает
 `Config`, `send()` возвращает поток `ChatEvent`, `cancel()` останавливает
-генерацию. Реализация может быть на чём угодно (TUI, CLI, Tauri-десктоп в
+генерацию. Реализация может быть на чём угодно (TUI, Tauri-десктоп в
 `desktop/`) — ядро менять не придётся.
 
 ## Стиль и практики

@@ -1,7 +1,7 @@
 """Shared presentation helpers — plain data formatting, no UI frameworks.
 
 Everything here is pure: no I/O, no state, no model calls. Frontends use these
-functions so that the CLI, TUI and a future GUI render identical information.
+functions so that the TUI and the desktop GUI render identical information.
 """
 
 from __future__ import annotations
@@ -194,7 +194,7 @@ def message_roles() -> dict[str, str]:
 
 
 def wrap_text(text: str, width: int) -> list[str]:
-    """Minimal word wrapper (used by non-Rich frontends such as the CLI)."""
+    """Minimal word wrapper (used for plain-text rendering)."""
     if width <= 1:
         return [text]
     lines: list[str] = []
@@ -217,7 +217,7 @@ def wrap_text(text: str, width: int) -> list[str]:
 
 
 def render_plain_exchange(role: str, text: str, width: int = 80) -> str:
-    """Plain-text rendering of one message (used by the CLI frontend)."""
+    """Plain-text rendering of one message."""
     label = message_roles().get(role, role.upper())
     body = "\n".join(wrap_text(text.strip(), width))
     return f"{label}\n\n{body}\n"
@@ -229,7 +229,7 @@ def muted(text: str) -> str:
 
 
 def sources_listing(sources) -> str:
-    """Numbered source list shared by CLI and TUI rendering."""
+    """Numbered source list shared by TUI and GUI rendering."""
     lines = []
     for source in sources:
         index = getattr(source, "index", 0)

@@ -85,5 +85,5 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Grouped-with-comments __all__ blocks are kept intentionally unsorted.
 "src/axiom/__init__.py" = ["RUF022"]
-# The CLI shim import must run before the guarded module lookups.
-"tests/frontends/test_cli.py" = ["E402"]
+# The GUI launcher import must run before the guarded module lookups.
+"tests/frontends/test_gui.py" = ["E402"]

@@ -2,16 +2,16 @@
 
 **AXIOM** — премиальный терминальный AI-клиент, работающий на локальном Ollama.
 Это не «ещё один чат в консоли»: это ядро с агентным циклом, инструментами и
-web search, обёрнутое в законченный TUI-воркспейс и скриптуемый CLI.
+web search, обёрнутое в законченный TUI-воркспейс и десктопный GUI.
 
 ```
                     AXIOM CORE
                         │
-        ┌───────────────┼───────────────┐
-        │               │               │
-     TUI (Textual)   CLI (argparse)  GUI (Tauri)
-        │               │               │
-        └───────────────┼───────────────┘
+            ┌───────────┴───────────┐
+            │                       │
+      TUI (Textual)           GUI (Tauri)
+            │                       │
+            └───────────┬───────────┘
                         │
               Event Stream + команды
                         │
@@ -102,25 +102,8 @@ axiom
 
 Все команды и горячие клавиши: [docs/tui.md](docs/tui.md).
 
-## CLI: one-shot, pipe и JSON
-
-AXIOM — не только TUI. CLI-фронтенд использует то же ядро:
-
-```bash
-axiom -p "объясни asyncio"            # ответ в stdout
-echo "вопрос" | axiom                 # pipe-режим
-axiom --json -p "2+2"                 # NDJSON-поток событий
-axiom --list-models                   # модели и capabilities
-axiom -m gemma4:12b -p "..."          # модель на этот запуск
-axiom -s -p "новости AI сегодня"      # принудительный web search
-axiom --think on -p "..."             # reasoning: auto|on|off
-axiom --no-search -p "..."            # отключить поиск
-axiom --ollama-url http://host:11434 -p "..."
-axiom --show-reasoning -p "..."       # reasoning в stderr
-axiom --version                       # AXIOM 1.0.0
-```
-
-Полное описание и формат JSON-событий: [docs/cli.md](docs/cli.md).
+Десктопный GUI: `axiom --gui` — запускает Tauri-приложение из `desktop/`
+(собранный exe или сборка через `npm run tauri dev`).
 
 ## Slash-команды
 
@@ -146,18 +129,18 @@ axiom --version                       # AXIOM 1.0.0
 
 | Проблема | Решение |
 |---|---|
-| `Ollama is not reachable` | запустите `ollama serve`; проверьте адрес: `axiom --list-models` |
+| `Ollama is not reachable` | запустите `ollama serve`; проверьте в TUI-панели `/status` |
 | `No models are installed` | `ollama pull qwen3:8b` |
 | Поиск не работает | проверьте сеть/прокси; поиск требует интернет, чат — нет |
 | Кракозябры в Windows-консоли | используйте Windows Terminal; `chcp 65001` |
-| Удалённый Ollama | `--ollama-url` или поле `ollama_url` в конфиге; локальный трафик идёт в обход системного прокси |
+| Удалённый Ollama | поле `ollama_url` в конфиге; локальный трафик идёт в обход системного прокси |
 | Модель «думает», но ответа нет | AXIOM покажет понятную ошибку empty-response вместо ложного `Completed`; попробуйте другую модель |
 
 ## Структура проекта
 
 ```text
-src/axiom/        core (frontend-agnostic) + frontends (tui/cli/gui) + shared
-docs/             архитектура, гайды по TUI/CLI, конфигурация, разработка
+src/axiom/        core (frontend-agnostic) + frontends (tui/gui) + shared
+docs/             архитектура, гайд по TUI, конфигурация, разработка
 assets/           логотип
 ```
 
