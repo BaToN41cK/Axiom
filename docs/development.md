@@ -12,9 +12,10 @@ pip install -e ".[dev]"
 регистрирует пакет и entry point `axiom`.
 
 ```bash
-axiom                # TUI
-axiom -p "ping"      # CLI
-pytest               # тесты (набор добавляется — см. TODO.md, раздел 4)
+axiom                     # TUI
+axiom --gui               # десктопный GUI (Tauri-приложение в desktop/)
+axiom -p "ping"           # CLI
+pytest                    # тесты
 ```
 
 ## Правила, которые нельзя нарушать
@@ -31,22 +32,43 @@ pytest               # тесты (набор добавляется — см. T
 7. **Не ломать работающее** — `inspect → understand → change → test`
    (правило §50 исходной спецификации).
 
+## Проверки перед коммитом
+
+```bash
+ruff check src tests            # линт — обязателен, 0 замечаний
+ruff format --check src tests   # формат — пока ЦЕЛЬ, не gate: 19 существующих файлов
+                                # ещё не приведены к ruff-формату (см. TODO §4)
+pytest -q                       # тесты — обязательны, 0 падений
+pyright src tests               # статические типы (тот же движок, что Pylance)
+```
+
+`pyright` объявлен в `.[dev]` (вместе с `ruff`), потому что ошибки редактора
+— это те же диагностики, и держать 0 ошибок нужно воспроизводимо из чистого
+окружения. Именно так был найден реальный баг в
+`frontends/tui/widgets/panels.py` (пропущенный `+` превращал f-строку в вызов
+и `/settings` падал).
+
 ## Тестовая инфраструктура
 
 `pyproject.toml` уже настроен: `pytest`, `asyncio_mode = "auto"`,
-`testpaths = ["tests"]`. Планируемый набор (см. `TODO.md`):
+`testpaths = ["tests"]`. Существующий набор:
 
 ```text
-tests/core/test_ollama_parser.py   reasoning/content, legacy <think>, чанки, метрики
+tests/core/test_ollama_parser.py   reasoning/content, legacy thinking, чанки, метрики
 tests/core/test_state_machine.py   переходы, финалы, reset
 tests/core/test_chat.py            send-поток, cancel, empty-answer, история
+tests/core/test_send_config.py     temperature/system/vision доезжают до Ollama
+tests/core/test_pasted_links.py    ссылки читаются без tool-calling
 tests/core/test_tools_registry.py  permissions, неизвестный tool, исключения
 tests/core/test_no_ui_imports.py   core не тянет UI-фреймворки
 tests/frontends/test_cli.py        -p / --json / pipe
+tests/live/test_ollama_live.py     живой Ollama (opt-in: AXIOM_LIVE_OLLAMA=1)
 ```
 
-Headless smoke-проверка TUI (использовалась при разработке):
-`App.run_test()` + реальная Ollama — splash → workspace → генерация → ANSWER.
+Живые проверки против настоящей Ollama (сеть, модели, tool-calling) — только
+в `tests/live/` под `@pytest.mark.ollama` и включаются явным
+`AXIOM_LIVE_OLLAMA=1`; по умолчанию пропускаются. Разовые скрипты и логи в
+корне репозитория не оставляем.
 
 ## Как добавить инструмент (tool)
 
@@ -69,11 +91,10 @@ registry.register(definition, my_handler)
 
 ## Как добавить фронтенд
 
-Контракт — `axiom/frontends/gui/__init__.py::GuiBackend` (Protocol):
-конструктор принимает `ChatSession`, `send()` возвращает поток `ChatEvent`,
-`cancel()` останавливает генерацию. Реализация может быть на чём угодно
-(Qt/Toga/web) — ядро менять не придётся. Пока `create_backend()` честно
-бросает `NotImplementedError`.
+Контракт — :class:`~axiom.core.chat.ChatSession`: конструктор принимает
+`Config`, `send()` возвращает поток `ChatEvent`, `cancel()` останавливает
+генерацию. Реализация может быть на чём угодно (TUI, CLI, Tauri-десктоп в
+`desktop/`) — ядро менять не придётся.
 
 ## Стиль и практики
 
@@ -96,4 +117,6 @@ registry.register(definition, my_handler)
 | как работает поиск | `core/search/duckduckgo.py`, `core/tools/web_search.py`, `core/agent.py` (`_execute_tool`, `_read_sources`) |
 | как TUI подписан на ядро | `frontends/tui/app.py` (`_dispatch_event`) |
 | как устроены панели | `frontends/tui/widgets/panels.py` |
+| как работают инструменты | `core/tools/registry.py`, `core/agent.py` (`_execute_tool`, `OFFERED_TOOLS`) |
+| почему ссылка из вопроса читается сама | `core/agent.py` (`_urls_in_text`, `_read_pasted_links`) |
 | где сохраняются разговоры | `core/history.py` |

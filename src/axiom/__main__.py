@@ -6,7 +6,7 @@ The only place in the project where a frontend is selected:
     axiom -p "hello"     → frontends.cli      (one-shot, pipe, --json)
     axiom --json ...     → frontends.cli
     echo "hi" | axiom    → frontends.cli      (stdin detected)
-    axiom --gui          → frontends.gui      (Tkinter GUI window)
+    axiom --gui          → frontends.gui      (Tauri desktop app, desktop/)
 """
 
 from __future__ import annotations
@@ -34,11 +34,11 @@ _HELP = f"""AXIOM {__version__} — Local Intelligence Terminal Workspace
 
 Usage:
   axiom                     Start the TUI workspace
+  axiom --gui               Start the desktop GUI (Tauri app in desktop/)
   axiom -p "question"       One-shot answer on stdout (CLI frontend)
   echo "question" | axiom   Pipe mode
   axiom --json -p "…"       NDJSON event stream
   axiom --list-models       List models detected in Ollama
-  axiom --gui               GUI window (Tkinter)
   axiom --help              Show this help
   axiom --version           Show the version
 """
@@ -68,17 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if "--gui" in args:
-        from axiom.frontends.gui import available
-
-        if not available():
-            print(
-                "The GUI frontend requires tkinter, which is missing from this "
-                "Python build.\nUse the TUI (`axiom`) or the CLI (`axiom -p \"...\").",
-                file=sys.stderr,
-            )
-            return 2
-
-        from axiom.frontends.gui.app import main as gui_main
+        from axiom.frontends.gui.main import main as gui_main
 
         return gui_main()
 

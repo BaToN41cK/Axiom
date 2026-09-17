@@ -318,13 +318,16 @@ class SettingsPanel(PanelScreen):
 
     def subtitle_lines(self) -> list[str]:
         direct = self._config.system_prompt or "(model default)"
-        think = "auto" if self._config.think is None else ("on" if self._config.think else "off")
+        if self._config.think is None:
+            think = "auto"
+        elif self._config.think:
+            think = "on"
+        else:
+            think = "off"
+        web = "on" if self._config.web_search_enabled else "off"
         return [
             f"Model {self._config.model or '(auto)'}  ·  {self._config.ollama_url}",
-            f"Web {'on' if self._config.web_search_enabled else 'off'}"
-            (
-                f"  ·  Thinking {think}  ·  Theme {self._config.theme}"
-            ),
+            f"Web {web}  ·  Thinking {think}  ·  Theme {self._config.theme}",
             f"Prompt: {direct[:64]}",
         ]
 

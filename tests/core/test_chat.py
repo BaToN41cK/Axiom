@@ -47,8 +47,17 @@ class FakeClient(OllamaClient):
         *,
         think: bool | None = None,
         tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        self.chat_calls.append({"model": model, "messages": messages, "think": think, "tools": tools})
+        self.chat_calls.append(
+            {
+                "model": model,
+                "messages": messages,
+                "think": think,
+                "tools": tools,
+                "options": options,
+            }
+        )
         if self._block is not None:
             await self._block.wait()
         for chunk in self._chunks:

@@ -16,6 +16,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from axiom.core.agent import Agent
 from axiom.core.config import Config
@@ -34,7 +35,7 @@ from axiom.core.events import (
 from axiom.core.history import Conversation, HistoryStore
 from axiom.core.models import ModelInfo, ModelRegistry
 from axiom.core.ollama import OllamaClient
-from axiom.core.search.duckduckgo import DuckDuckGoProvider
+from axiom.core.search.multi import MultiSearchProvider
 from axiom.core.search.provider import SearchProvider
 from axiom.core.state import GenerationState
 from axiom.core.state_machine import GenerationStateMachine
@@ -73,7 +74,7 @@ class ChatSession:
         self.client = client or OllamaClient(self.config.ollama_url)
         self.registry = registry or ModelRegistry(self.client)
         self.history_store = history_store if history_store is not None else HistoryStore()
-        self.provider = provider or DuckDuckGoProvider()
+        self.provider = provider or MultiSearchProvider()
         self.web_tool = WebSearchTool(self.provider, max_sources=self.config.search_max_sources)
         self.tools = ToolRegistry()
         self.web_tool.register(self.tools)
@@ -226,6 +227,7 @@ class ChatSession:
         *,
         force_search: bool = False,
         search_query: str | None = None,
+        images: list[str] | None = None,
     ) -> AsyncIterator[ChatEvent]:
         """Send a user message and stream the resulting events.
 
@@ -233,7 +235,8 @@ class ChatSession:
         preserved and reported with a ``CANCELLED`` terminal event.
         """
         text = text.strip()
-        if not text:
+        images = [img for img in (images or []) if img]
+        if not text and not images:
             return
         if self.busy:
             yield ErrorEvent(
@@ -253,8 +256,26 @@ class ChatSession:
                 yield Done(state=GenerationState.ERROR)
                 return
 
+        if images and self.active_model is not None and self.active_model.supports("vision") is not True:
+            yield ErrorEvent(
+                message=(
+                    f"The model '{self.active_model.name}' does not support images."
+                ),
+                kind="vision_unsupported",
+                hint="Switch to a vision model (e.g. llava, llama3.2-vision, qwen2.5vl).",
+            )
+            yield Done(state=GenerationState.ERROR)
+            return
+
         self.machine.reset()
-        self.conversation.messages.append(Message(role="user", content=text, created_at=time.time()))
+        self.conversation.messages.append(
+            Message(
+                role="user",
+                content=text,
+                created_at=time.time(),
+                images=[img for img in (images or []) if img],
+            )
+        )
         self.conversation.derive_title()
 
         queue: asyncio.Queue[ChatEvent | None] = asyncio.Queue()
@@ -274,8 +295,12 @@ class ChatSession:
         """Convert stored messages into the Ollama request format."""
         history: list[dict] = []
         for message in self.conversation.messages[-CONTEXT_MESSAGES:]:
-            if message.role in ("user", "assistant") and message.content:
-                history.append({"role": message.role, "content": message.content})
+            if message.role in ("user", "assistant") and (message.content or message.images):
+                entry: dict[str, Any] = {"role": message.role, "content": message.content}
+                if message.images:
+                    # Ollama vision models expect base64 images per message.
+                    entry["images"] = message.images
+                history.append(entry)
         return history
 
     def _final_status(self, target: GenerationState) -> StatusChange | None:

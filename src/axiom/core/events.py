@@ -15,13 +15,15 @@ from axiom.core.state import GenerationState
 
 
 class Message(BaseModel):
-    """A chat message (role: user / assistant / system)."""
+    """A chat message (role: user / assistant / system / tool)."""
 
     role: Literal["user", "assistant", "system", "tool"]
     content: str = ""
     thinking: str | None = None
     name: str | None = None
     created_at: float | None = None
+    #: Base64-encoded images attached to this message (Ollama vision models)
+    images: list[str] = Field(default_factory=list)
 
 
 class ReasoningChunk(BaseModel):

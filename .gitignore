@@ -20,6 +20,16 @@ venv/
 .smoke-home/
 .smoke/
 
+# Desktop (Tauri + React)
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/data/
+desktop/*.log
+
 # OS
 Thumbs.db
 .DS_Store
+
+# Local planning notes (tracked file stays in repo; ignored only for untracked copies)
+TODO.md

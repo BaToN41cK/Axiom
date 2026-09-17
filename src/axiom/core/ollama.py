@@ -251,9 +251,10 @@ class OllamaClient:
         *,
         think: bool | None = None,
         tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream a chat generation as normalised :class:`StreamChunk` items."""
-        return self._chat_stream(model, messages, think=think, tools=tools)
+        return self._chat_stream(model, messages, think=think, tools=tools, options=options)
 
     async def _chat_stream(
         self,
@@ -262,12 +263,16 @@ class OllamaClient:
         *,
         think: bool | None = None,
         tools: list[dict[str, Any]] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if think is not None:
             payload["think"] = think
         if tools:
             payload["tools"] = tools
+        if options:
+            # Real Ollama generation parameters (temperature, num_ctx, ...).
+            payload["options"] = options
 
         parser = ChatStreamParser()
         try:

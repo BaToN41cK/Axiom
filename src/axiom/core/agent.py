@@ -11,6 +11,7 @@ only when a real search provider returned them.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -31,15 +32,32 @@ from axiom.core.ollama import OllamaClient, ToolCallRequest
 from axiom.core.state import GenerationState
 from axiom.core.state_machine import GenerationStateMachine
 from axiom.core.tools.registry import ToolRegistry
-from axiom.core.tools.web_search import WEB_SEARCH_TOOL, WebSearchTool
+from axiom.core.tools.web_search import FETCH_URL_TOOL, WEB_SEARCH_TOOL, WebSearchTool
 
 #: Hard limit on tool rounds — the agent must never loop forever.
 MAX_TOOL_ROUNDS = 3
 
+#: Tools the agent advertises to the model. ``fetch_url`` matters most when the
+#: user pastes a link: the model must read the page instead of guessing.
+OFFERED_TOOLS = (WEB_SEARCH_TOOL, FETCH_URL_TOOL)
+
+#: Links the user pasted are read automatically — local models do not reliably
+#: call tools on their own, so the agent must not depend on that.
+MAX_AUTO_FETCH = 2
+
+#: Characters of a fetched page handed to the model as context.
+MAX_PAGE_CHARS = 6000
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are AXIOM, a precise local AI assistant running on the user's machine "
     "through Ollama. Answer directly and accurately. Use markdown when it helps. "
-    "Never invent facts; if you are unsure, say so."
+    "Never invent facts; if you are unsure, say so.\n\n"
+    "You have real tools:\n"
+    "- web_search(query) — search the public web; use it whenever the answer "
+    "may depend on current or factual online information.\n"
+    "- fetch_url(url) — read a web page; ALWAYS use it when the user gives a "
+    "link, so you answer from the actual page content, not from memory.\n"
+    "Do not say you cannot browse the web — you can, through these tools."
 )
 
 SEARCH_SYSTEM_PROMPT = (
@@ -47,6 +65,13 @@ SEARCH_SYSTEM_PROMPT = (
     "the public web. Base your answer on them, cite the sources you used as "
     "[number] where relevant, and state clearly when the sources do not answer "
     "the question."
+)
+
+PAGE_SYSTEM_PROMPT = (
+    "You are AXIOM. The user gave a link and the pages below were read in real "
+    "time from the live web — this is the actual page content, not your memory. "
+    "Answer strictly from it, quote concrete details, and say plainly if the "
+    "page does not contain what was asked. Never claim you cannot open links."
 )
 
 
@@ -82,6 +107,8 @@ class Agent:
         self.last_thinking = ""
         self.last_metrics: dict = {}
         self.metrics: dict = {}
+        #: Pages read because the user pasted their links, as (url, text).
+        self._pasted_pages: list[tuple[str, str]] = []
 
     # ------------------------------------------------------------------ utils
 
@@ -111,7 +138,7 @@ class Agent:
             return None
         if model.supports("tools") is not True:
             return None
-        schemas = [s for s in self._registry.schemas() if s["function"]["name"] == WEB_SEARCH_TOOL]
+        schemas = [s for s in self._registry.schemas() if s["function"]["name"] in OFFERED_TOOLS]
         return schemas or None
 
     @staticmethod
@@ -148,7 +175,12 @@ class Agent:
         """Stream one real model pass, emitting reasoning/content deltas."""
         saw_thinking = False
         saw_content = False
-        async for chunk in self._client.chat(model.name, messages, think=think, tools=tools):
+        options: dict = {}
+        if self._config.temperature is not None:
+            options["temperature"] = self._config.temperature
+        async for chunk in self._client.chat(
+            model.name, messages, think=think, tools=tools, options=options or None
+        ):
             if chunk.thinking:
                 if not saw_thinking:
                     saw_thinking = True
@@ -180,6 +212,8 @@ class Agent:
             # The UI shows this detail to the user — it must be the real
             # query, not the tool name.
             detail = str(call.arguments.get("query") or call.name)
+        elif call.name == FETCH_URL_TOOL:
+            detail = str(call.arguments.get("url") or call.name)
         else:
             detail = call.name
         status = self._status(
@@ -229,6 +263,51 @@ class Agent:
                 duration_ms=result.duration_ms,
             )
 
+    #: Matches http(s) links a user may paste into a message.
+    _URL_RE = re.compile(r"https?://[^\s<>\"'`)\]]+")
+
+    @classmethod
+    def _urls_in_text(cls, text: str) -> list[str]:
+        """Links found in a message, de-duplicated, order preserved."""
+        found: list[str] = []
+        for raw in cls._URL_RE.findall(text or ""):
+            url = raw.rstrip(".,;:!?")
+            if url and url not in found:
+                found.append(url)
+        return found
+
+    async def _read_pasted_links(self, history: list[dict]) -> AsyncIterator[ChatEvent]:
+        """Read the pages a user linked, so answers come from the real content."""
+        self._pasted_pages = []
+        if self._web_tool is None or not self._config.web_search_enabled:
+            return
+        urls = self._urls_in_text(self._last_user_text(history))[:MAX_AUTO_FETCH]
+        for url in urls:
+            page = ""
+            async for event in self._execute_tool(
+                ToolCallRequest(name=FETCH_URL_TOOL, arguments={"url": url})
+            ):
+                if (
+                    isinstance(event, ToolResultEvent)
+                    and event.name == FETCH_URL_TOOL
+                    and event.ok
+                ):
+                    page = event.content
+                yield event
+            if page:
+                self._pasted_pages.append((url, page))
+        if self._pasted_pages:
+            self.last_sources = [
+                SourceItem(
+                    index=index,
+                    title=url,
+                    url=url,
+                    snippet=" ".join(text.split())[:200],
+                )
+                for index, (url, text) in enumerate(self._pasted_pages, start=1)
+            ]
+            yield SearchResultEvent(query=urls[0], sources=self.last_sources)
+
     # ------------------------------------------------------------- agent loop
 
     async def run(
@@ -245,8 +324,9 @@ class Agent:
         self.last_content = ""
         self.last_thinking = ""
         self.last_metrics: dict = {}
+        self._pasted_pages = []
 
-        system = DEFAULT_SYSTEM_PROMPT
+        system = self._config.system_prompt or DEFAULT_SYSTEM_PROMPT
         if force_search:
             if not self._config.web_search_enabled or self._web_tool is None:
                 from axiom.core.events import ErrorEvent
@@ -277,6 +357,20 @@ class Agent:
                         "Answer from your own knowledge and state clearly that live sources "
                         "were unavailable."
                     )
+        elif self._config.web_search_enabled and self._web_tool is not None:
+            # A pasted link must be read for real. Small local models often skip
+            # tools entirely, so the agent fetches the page instead of waiting.
+            async for event in self._read_pasted_links(history):
+                yield event
+            pages = self._pasted_pages
+            if pages:
+                # Keep the configured system prompt and append the real page
+                # content — a user's custom prompt must survive.
+                page_block = "\n\n".join(
+                    f"Page {index} — {url}\n{text[:MAX_PAGE_CHARS]}"
+                    for index, (url, text) in enumerate(pages, start=1)
+                )
+                system = f"{system}\n\n{PAGE_SYSTEM_PROMPT}\n\nLive pages:\n{page_block}"
 
         messages = self._build_messages(history, system)
         think = self._think_flag(model)
