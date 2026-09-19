@@ -19,11 +19,6 @@ struct Bridge {
     stdin: Mutex<Option<std::process::ChildStdin>>,
 }
 
-struct Paths {
-    root: PathBuf,
-    python: String,
-}
-
 fn find_root() -> PathBuf {
     if let Ok(env_root) = std::env::var("AXIOM_DESKTOP_ROOT") {
         return PathBuf::from(env_root);
@@ -74,24 +69,47 @@ fn find_python() -> String {
 
 
 fn spawn_bridge(app: &AppHandle) -> Result<(), String> {
-    let paths = Paths {
-        root: find_root(),
-        python: find_python(),
-    };
-    let bridge_py = paths.root.join("desktop/src-tauri/bridge/axiom_bridge.py");
-    let src_dir = paths.root.join("src");
-    if !bridge_py.exists() {
-        return Err(format!("bridge script not found: {}", bridge_py.display()));
+    let python = find_python();
+    // 1. Repository layout (dev): <root>/desktop/src-tauri/bridge/axiom_bridge.py
+    // 2. Bundled layout (installed): the bridge script ships as a Tauri
+    //    resource (tauri.conf.json `bundle.resources`) next to the exe.
+    let mut bridge_py: Option<PathBuf> = None;
+    let mut src_dir: Option<PathBuf> = None;
+    let repo_root = find_root();
+    let repo_bridge = repo_root.join("desktop/src-tauri/bridge/axiom_bridge.py");
+    if repo_bridge.exists() {
+        bridge_py = Some(repo_bridge);
+        src_dir = Some(repo_root.join("src"));
     }
+    if bridge_py.is_none() {
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            let bundled = resource_dir.join("bridge/axiom_bridge.py");
+            if bundled.exists() {
+                bridge_py = Some(bundled);
+            }
+        }
+    }
+    let bridge_py = bridge_py
+        .ok_or_else(|| "bridge script not found (repo layout and bundled resources)".to_string())?;
 
-    let mut cmd = Command::new(&paths.python);
+    let mut cmd = Command::new(&python);
     cmd.arg("-u").arg(&bridge_py);
-    cmd.env("PYTHONPATH", &src_dir);
+    if let Some(src) = src_dir {
+        // Repository layout: import the working-tree package. An installed
+        // bundle has no src/ — the `axiom` package must be installed in the
+        // Python environment (see docs/gui.md).
+        cmd.env("PYTHONPATH", &src);
+    }
     // Give the core a private data home unless the user already set one.
     if std::env::var("AXIOM_HOME").is_err() {
-        let home = paths.root.join("desktop/data");
-        let _ = std::fs::create_dir_all(&home);
-        cmd.env("AXIOM_HOME", &home);
+        let home = std::env::var("AXIOM_DESKTOP_ROOT")
+            .map(|root| PathBuf::from(root).join("desktop/data"))
+            .unwrap_or_else(|_| repo_root.join("desktop/data"));
+        if home.parent().is_some() && home.parent().map(|p| p.exists()).unwrap_or(false) {
+            let _ = std::fs::create_dir_all(&home);
+            cmd.env("AXIOM_HOME", &home);
+        }
+        // Bundled installs without a repo layout keep the default ~/.axiom.
     }
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
@@ -101,7 +119,7 @@ fn spawn_bridge(app: &AppHandle) -> Result<(), String> {
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("failed to start Python core ({}): {}", paths.python, e))?;
+        .map_err(|e| format!("failed to start Python core ({}): {}", python, e))?;
     let stdin = child
         .stdin
         .take()
@@ -187,6 +205,34 @@ fn bridge_restart(app: AppHandle) -> Result<(), String> {
     spawn_bridge(&app)
 }
 
+/// Open an http(s) link in the user's real browser.
+///
+/// The webview must never navigate away from the app, and AXIOM ships no
+/// browser plugin, so links are handed to the OS directly.
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")) {
+        return Err("only http(s) and mailto links can be opened".to_string());
+    }
+    let target = url.trim().to_string();
+    #[cfg(target_os = "windows")]
+    let spawn = Command::new("cmd")
+        .args(["/C", "start", "", &target])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let spawn = Command::new("open").arg(&target).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let spawn = Command::new("xdg-open").arg(&target).spawn();
+    spawn.map(|_| ()).map_err(|e| format!("could not open the link: {e}"))
+}
+
+/// Close AXIOM (used by the `/exit` command and the window-close shortcut).
+#[tauri::command]
+fn quit_app(app: AppHandle) {
+    app.exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -198,7 +244,17 @@ pub fn run() {
             });
             if let Err(err) = spawn_bridge(&handle) {
                 eprintln!("bridge startup error: {err}");
-                let _ = handle.emit("bridge://stderr", err);
+                let _ = handle.emit("bridge://stderr", err.clone());
+                // Unblock any pending frontend requests instead of hanging.
+                let _ = handle.emit(
+                    "bridge://line",
+                    serde_json::json!({
+                        "type": "reply",
+                        "req": 0,
+                        "ok": false,
+                        "error": format!("bridge-exited: {err}")
+                    }),
+                );
             }
             Ok(())
         })
@@ -213,7 +269,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             bridge_request,
-            bridge_restart
+            bridge_restart,
+            open_url,
+            quit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running AXIOM");

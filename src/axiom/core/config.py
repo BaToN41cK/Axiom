@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -35,6 +36,10 @@ class Config(BaseModel):
     #: How many search sources to keep / how many pages to actually read
     search_max_sources: int = Field(default=5, ge=1, le=10)
     search_read_sources: int = Field(default=3, ge=0, le=10)
+    #: Per-request timeout for search engines and page reading (seconds)
+    search_timeout: float = Field(default=20.0, gt=0.0, le=300.0)
+    #: Maximum number of stored conversations (oldest are pruned on save)
+    history_limit: int = Field(default=100, ge=1, le=1000)
     #: Show real reasoning when the model provides it
     show_reasoning: bool = True
     #: Whether the reasoning block starts expanded
@@ -48,6 +53,23 @@ class Config(BaseModel):
     #: Optional generation parameters
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     system_prompt: str | None = None
+
+    # ------------------------------------------------------------ workspace UI
+    #: UI density of the desktop workspace
+    density: Literal["compact", "comfortable", "spacious"] = "comfortable"
+    #: Base UI font size in pixels
+    font_size: int = Field(default=14, ge=12, le=18)
+    #: Sidebar visibility/width are part of the persisted workspace state
+    sidebar_open: bool = True
+    sidebar_width: int = Field(default=268, ge=200, le=420)
+    #: Render assistant answers as markdown
+    render_markdown: bool = True
+    #: Keep the chat pinned to the newest message while streaming
+    auto_scroll: bool = True
+    #: Show real per-answer metrics (tokens, tok/s, duration)
+    show_metrics: bool = True
+    #: Show the context panel counters in the composer strip
+    show_context: bool = True
 
     @classmethod
     def path(cls) -> Path:

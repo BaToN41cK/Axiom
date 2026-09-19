@@ -15,7 +15,7 @@ import re
 import httpx
 
 from axiom.core.errors import SearchUnavailableError
-from axiom.core.search.provider import SearchProvider, SearchResult, extract_text
+from axiom.core.search.provider import SearchProvider, SearchResult, _decode_body, extract_text
 
 #: A real desktop user agent — Brave returns the plain HTML page only for these.
 _USER_AGENT = (
@@ -121,6 +121,6 @@ async def _read_page(
             content_type = response.headers.get("content-type", "")
             if "html" not in content_type and "text" not in content_type:
                 return ""
-            return extract_text(response.text, max_chars=max_chars)
+            return extract_text(_decode_body(response), max_chars=max_chars)
     except httpx.HTTPError as exc:
         raise SearchUnavailableError(f"Could not read source: {url}") from exc

@@ -73,8 +73,10 @@ class ChatSession:
         self.config = config or Config.load()
         self.client = client or OllamaClient(self.config.ollama_url)
         self.registry = registry or ModelRegistry(self.client)
-        self.history_store = history_store if history_store is not None else HistoryStore()
-        self.provider = provider or MultiSearchProvider()
+        self.history_store = history_store if history_store is not None else HistoryStore(
+            limit=self.config.history_limit if self.config.save_history else None
+        )
+        self.provider = provider or MultiSearchProvider(timeout=self.config.search_timeout)
         self.web_tool = WebSearchTool(self.provider, max_sources=self.config.search_max_sources)
         self.tools = ToolRegistry()
         self.web_tool.register(self.tools)
@@ -141,6 +143,27 @@ class ChatSession:
     async def refresh_models(self) -> list[ModelInfo]:
         return await self.registry.refresh()
 
+    async def model_detail(self, name: str | None = None) -> ModelInfo | None:
+        """Full descriptor (real context window) of *name* or the active model."""
+        target = name or (self.active_model.name if self.active_model else None)
+        if not target:
+            return None
+        detail = await self.registry.detail(target)
+        if detail is not None and self.active_model is not None and detail.name == self.active_model.name:
+            self.active_model = detail
+        return detail
+
+    def tools_info(self) -> list[dict[str, Any]]:
+        """Agent tools as the backend really declares them (name/description/permission)."""
+        return [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "permission": definition.permission.value,
+            }
+            for definition in self.tools.definitions()
+        ]
+
     async def reconnect(self, ollama_url: str | None = None) -> StartupReport:
         """Apply a new Ollama URL (if given) and probe again."""
         if ollama_url and ollama_url.strip() and ollama_url.strip() != self.client.base_url:
@@ -201,6 +224,13 @@ class ChatSession:
             )
         return self.history_store.delete(conversation_id)
 
+    def rename_conversation(self, conversation_id: str, title: str) -> bool:
+        """Rename a stored conversation; the in-memory one is updated too."""
+        renamed = self.history_store.rename(conversation_id, title)
+        if renamed and conversation_id == self.conversation.id:
+            self.conversation.title = " ".join(title.split())[:80]
+        return renamed
+
     def _save_conversation(self) -> None:
         if not self.config.save_history:
             return
@@ -238,6 +268,103 @@ class ChatSession:
         images = [img for img in (images or []) if img]
         if not text and not images:
             return
+        async for event in self._run_turn(
+            text,
+            force_search=force_search,
+            search_query=search_query,
+            images=images,
+            record_user=True,
+        ):
+            yield event
+
+    async def regenerate(self, *, force_search: bool = False) -> AsyncIterator[ChatEvent]:
+        """Re-run the last turn: the stored assistant answer is dropped first.
+
+        The backend really rewrites history here (no client-side illusion):
+        the previous assistant message is removed from the conversation before
+        the agent runs again on the same context.
+        """
+        if self.busy:
+            yield ErrorEvent(
+                message="A generation is already running.",
+                kind="busy",
+                hint="Stop it before regenerating.",
+            )
+            return
+        last_user = next(
+            (m.content for m in reversed(self.conversation.messages) if m.role == "user"),
+            "",
+        )
+        if not last_user:
+            yield ErrorEvent(
+                message="There is nothing to regenerate.",
+                kind="empty_history",
+                hint="Send a message first.",
+            )
+            yield Done(state=GenerationState.ERROR)
+            return
+        if self.conversation.messages and self.conversation.messages[-1].role == "assistant":
+            self.conversation.messages.pop()
+        self._save_conversation()
+        async for event in self._run_turn(
+            last_user,
+            force_search=force_search,
+            search_query=None,
+            images=[],
+            record_user=False,
+        ):
+            yield event
+
+    async def edit_last_user(self, text: str, *, force_search: bool = False) -> AsyncIterator[ChatEvent]:
+        """Replace the last user turn and everything after it, then re-run.
+
+        Editing a sent message is a real history rewrite: the backend drops the
+        old user message (and the answer that followed it) before generating
+        again — no duplicated turns pile up in the stored conversation.
+        """
+        text = text.strip()
+        if not text:
+            yield ErrorEvent(message="The message cannot be empty.", kind="empty_message")
+            return
+        if self.busy:
+            yield ErrorEvent(
+                message="A generation is already running.",
+                kind="busy",
+                hint="Stop it before editing.",
+            )
+            return
+        index = next(
+            (i for i in range(len(self.conversation.messages) - 1, -1, -1)
+             if self.conversation.messages[i].role == "user"),
+            None,
+        )
+        if index is None:
+            yield ErrorEvent(
+                message="There is no user message to edit.",
+                kind="empty_history",
+            )
+            yield Done(state=GenerationState.ERROR)
+            return
+        del self.conversation.messages[index:]
+        async for event in self._run_turn(
+            text,
+            force_search=force_search,
+            search_query=None,
+            images=[],
+            record_user=True,
+        ):
+            yield event
+
+    async def _run_turn(
+        self,
+        text: str,
+        *,
+        force_search: bool,
+        search_query: str | None,
+        images: list[str],
+        record_user: bool,
+    ) -> AsyncIterator[ChatEvent]:
+        """Shared body of ``send`` / ``regenerate`` — one real generation cycle."""
         if self.busy:
             yield ErrorEvent(
                 message="A generation is already running.",
@@ -268,15 +395,21 @@ class ChatSession:
             return
 
         self.machine.reset()
-        self.conversation.messages.append(
-            Message(
-                role="user",
-                content=text,
-                created_at=time.time(),
-                images=[img for img in (images or []) if img],
+        if record_user:
+            self.conversation.messages.append(
+                Message(
+                    role="user",
+                    content=text,
+                    created_at=time.time(),
+                    images=[img for img in (images or []) if img],
+                )
             )
-        )
-        self.conversation.derive_title()
+            self.conversation.derive_title()
+        elif images:
+            # Regeneration keeps the original images of the recorded user turn.
+            self.conversation.messages.append(
+                Message(role="user", content=text, created_at=time.time(), images=list(images))
+            )
 
         queue: asyncio.Queue[ChatEvent | None] = asyncio.Queue()
         self._task = asyncio.create_task(

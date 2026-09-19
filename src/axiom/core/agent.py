@@ -350,7 +350,10 @@ class Agent:
                             search_failed = True
                     yield event
                 if search_block:
-                    system = f"{SEARCH_SYSTEM_PROMPT}\n\nSearch results:\n{search_block}"
+                    # Keep the configured system prompt and append the search
+                    # context — a user's custom prompt must survive (same
+                    # behaviour as the pasted-links branch below).
+                    system = f"{system}\n\n{SEARCH_SYSTEM_PROMPT}\n\nSearch results:\n{search_block}"
                 elif search_failed:
                     system = (
                         f"{DEFAULT_SYSTEM_PROMPT}\n\nLive web search was attempted but failed. "

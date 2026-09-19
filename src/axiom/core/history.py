@@ -36,10 +36,15 @@ class Conversation(BaseModel):
 
 
 class HistoryStore:
-    """Reads and writes conversations under ``~/.axiom/history``."""
+    """Reads and writes conversations under ``~/.axiom/history``.
 
-    def __init__(self, directory: Path | None = None) -> None:
+    A size limit keeps the directory from growing forever: when ``limit`` is
+    set, the oldest conversations are pruned on every save.
+    """
+
+    def __init__(self, directory: Path | None = None, limit: int | None = None) -> None:
         self._dir = directory or (axiom_home() / "history")
+        self._limit = limit
 
     @property
     def directory(self) -> Path:
@@ -61,6 +66,46 @@ class HistoryStore:
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(conversation.model_dump_json(indent=2), encoding="utf-8")
         tmp.replace(path)
+        self._prune()
+
+    def _prune(self) -> None:
+        """Keep at most ``limit`` newest conversations (``None`` = keep all)."""
+        if not self._limit or self._limit < 1:
+            return
+        for old in self.list()[self._limit:]:
+            try:
+                self._path(old.id).unlink()
+            except OSError:
+                continue
+
+    def set_limit(self, limit: int | None) -> None:
+        """Change the size limit at runtime (``None`` = unlimited)."""
+        self._limit = limit
+
+    def rename(self, conversation_id: str, title: str) -> bool:
+        """Rename a stored conversation (the real title lives on disk)."""
+        clean = " ".join((title or "").split())
+        if not clean:
+            return False
+        conversation = self.load(conversation_id)
+        if conversation is None:
+            return False
+        conversation.title = clean[:80]
+        try:
+            self.save(conversation)
+        except OSError:
+            return False
+        return True
+
+    def show(self, conversation_id: str) -> str | None:
+        """Raw JSON of one conversation — the ``show`` half of list/show/rm."""
+        path = self._path(conversation_id)
+        if not path.exists():
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
 
     def load(self, conversation_id: str) -> Conversation | None:
         path = self._path(conversation_id)

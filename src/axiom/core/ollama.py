@@ -244,6 +244,47 @@ class OllamaClient:
             raise InvalidResponseError("Unexpected /api/tags response shape.")
         return [m for m in models if isinstance(m, dict)]
 
+    async def list_running(self) -> list[dict[str, Any]]:
+        """Raw descriptors of models currently loaded in memory (``/api/ps``).
+
+        Best-effort by design: a status indicator (``Ready`` vs ``Idle``) must
+        never break the model list, so transport problems yield ``[]``.
+        """
+        try:
+            async with self._client(_PROBE_TIMEOUT) as client:
+                response = await client.get("/api/ps")
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPError, OSError, ValueError):
+            return []
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            return []
+        return [m for m in models if isinstance(m, dict)]
+
+    async def show_model(self, name: str) -> dict[str, Any]:
+        """Real per-model detail from ``POST /api/show``.
+
+        This is the only endpoint that exposes the true maximum context window
+        (``model_info["<arch>.context_length"]``) and the effective ``num_ctx``
+        send in ``parameters`` — used by the GUI context panel.
+        """
+        try:
+            async with self._client(_PROBE_TIMEOUT) as client:
+                response = await client.post("/api/show", json={"model": name})
+                if response.status_code == 404:
+                    raise ModelNotFoundError(f"Model '{name}' is not available in Ollama.")
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            raise OllamaUnavailableError(
+                "Unable to reach the Ollama server.",
+                hint=f"Check that Ollama is running at {self._base_url}",
+            ) from exc
+        if not isinstance(data, dict):
+            raise InvalidResponseError("Unexpected /api/show response shape.")
+        return data
+
     def chat(
         self,
         model: str,

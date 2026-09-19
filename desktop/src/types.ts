@@ -2,13 +2,21 @@
 
 export type Role = "user" | "assistant" | "system" | "tool";
 
+export type Capability = "completion" | "tools" | "thinking" | "vision";
+
 export interface ModelInfo {
   name: string;
   displayName: string;
   sizeGb: number;
+  sizeBytes: number;
   parameterSize: string;
+  quantization: string;
+  family: string;
   capabilities: string[];
   contextLength: number | null;
+  numCtx: number | null;
+  /** Ollama reports the model as resident in memory (/api/ps). */
+  loaded: boolean;
 }
 
 export interface Conversation {
@@ -29,6 +37,8 @@ export interface StoredMessage {
   images?: string[];
 }
 
+export type Density = "compact" | "comfortable" | "spacious";
+
 export interface AxiomConfig {
   ollama_url: string;
   model: string | null;
@@ -36,6 +46,8 @@ export interface AxiomConfig {
   web_search_enabled: boolean;
   search_max_sources: number;
   search_read_sources: number;
+  search_timeout: number;
+  history_limit: number;
   show_reasoning: boolean;
   reasoning_expanded: boolean;
   theme: string;
@@ -43,6 +55,14 @@ export interface AxiomConfig {
   save_history: boolean;
   temperature: number | null;
   system_prompt: string | null;
+  density: Density;
+  font_size: number;
+  sidebar_open: boolean;
+  sidebar_width: number;
+  render_markdown: boolean;
+  auto_scroll: boolean;
+  show_metrics: boolean;
+  show_context: boolean;
 }
 
 export interface SourceItem {
@@ -70,6 +90,19 @@ export type CoreEvent =
   | { type: "error"; message: string; kind: string; hint: string | null }
   | ({ type: "done" } & DoneMetrics);
 
+export type ToolState = "running" | "ok" | "failed" | "cancelled";
+
+export interface ToolActivity {
+  name: string;
+  /** Human readable target: the search query, the page URL, ... */
+  detail: string;
+  state: ToolState;
+  durationMs?: number;
+  error?: string | null;
+  /** Real results of a search/fetch tool, when it produced any. */
+  sources?: SourceItem[];
+}
+
 export interface LiveMessage {
   id: string;
   role: Role;
@@ -80,13 +113,48 @@ export interface LiveMessage {
   toolCalls: ToolActivity[];
   sources: SourceItem[];
   metrics?: DoneMetrics | null;
+  createdAt: number;
   /** Base64 images attached by the user (vision models). */
   images?: string[];
 }
 
-export interface ToolActivity {
+export interface HealthReport {
+  available: boolean;
+  version: string | null;
+  url: string;
+}
+
+export interface StartupReport {
+  available: boolean;
+  version: string | null;
+  error: string | null;
+  hint: string | null;
+  models: ModelInfo[];
+  selected: ModelInfo | null;
+  state: { state: string; model: string | null };
+}
+
+export interface StatusReport {
+  state: string;
+  model: string | null;
+  lastMetrics: Partial<DoneMetrics>;
+  ollamaUrl: string;
+  version: string | null;
+  activeModel: ModelInfo | null;
+  historyCount: number;
+  configPath: string;
+  busy: boolean;
+}
+
+export interface ToolInfo {
   name: string;
-  detail: string;
-  state: "running" | "ok" | "failed";
-  durationMs?: number;
+  description: string;
+  permission: string;
+}
+
+export interface SendResult {
+  state: string;
+  lastMetrics: Partial<DoneMetrics>;
+  conversation: Conversation;
+  activeModel: ModelInfo | null;
 }

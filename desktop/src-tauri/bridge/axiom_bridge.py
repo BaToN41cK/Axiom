@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import threading
 
@@ -20,15 +21,27 @@ from axiom.core.events import ChatEvent
 OUT_LOCK = threading.Lock()
 
 
-def _model_json(m) -> dict:
+def _model_json(m, loaded: bool = False) -> dict:
     return {
         "name": m.name,
         "displayName": m.display_name,
         "sizeGb": m.size_gb,
+        "sizeBytes": m.size,
         "parameterSize": m.parameter_size,
+        "quantization": m.quantization,
+        "family": m.family,
         "capabilities": m.capabilities,
         "contextLength": m.context_length,
+        "numCtx": m.num_ctx,
+        "loaded": loaded,
     }
+
+
+async def _models_json(session: ChatSession) -> list[dict]:
+    """Models plus their real in-memory state from ``/api/ps``."""
+    models = await session.refresh_models()
+    loaded = await session.registry.running_names()
+    return [_model_json(m, loaded=m.name in loaded) for m in models]
 
 
 def _conversation_summary(c) -> dict:
@@ -113,7 +126,7 @@ def _write_line(line: str) -> None:
         sys.stdout.flush()
 
 
-def _state_json(session: ChatSession) -> dict:
+async def _state_json(session: ChatSession) -> dict:
     return {
         "state": session.state.value if session.state else "idle",
         "model": session.active_model.name if session.active_model else None,
@@ -121,30 +134,96 @@ def _state_json(session: ChatSession) -> dict:
     }
 
 
+async def _stream_turn(session: ChatSession, events) -> dict:
+    """Stream a real generation cycle to the shell, then report the final state."""
+    async for event in events:
+        line = json.dumps({"type": "event", "event": _event_json(event)}, ensure_ascii=False)
+        await asyncio.get_running_loop().run_in_executor(None, _write_line, line)
+    return {
+        "state": session.state.value,
+        "lastMetrics": session.last_metrics or {},
+        "conversation": _conversation_summary(session.conversation),
+        "activeModel": _model_json(session.active_model) if session.active_model else None,
+    }
+
+
 async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
+    if cmd == "health":
+        available = await session.client.is_available()
+        version = None
+        if available:
+            try:
+                version = await session.client.version()
+            except Exception:  # noqa: BLE001 - a version probe must never fail the UI
+                version = None
+        return {"available": available, "version": version, "url": session.client.base_url}
+    if cmd == "status":
+        return {
+            **_state_json(session),
+            "ollamaUrl": session.client.base_url,
+            "version": await session.client.version() if await session.client.is_available() else None,
+            "activeModel": _model_json(session.active_model) if session.active_model else None,
+            "historyCount": len(session.history()),
+            "configPath": str(type(session.config).path()),
+            "busy": session.busy,
+        }
+    if cmd == "tools":
+        return session.tools_info()
+    if cmd == "model_info":
+        detail = await session.model_detail(args.get("name"))
+        return _model_json(detail) if detail else None
     if cmd == "startup":
         report = await session.startup()
+        models = report.models or []
+        loaded: set[str] = set()
+        if report.ollama_available:
+            loaded = await session.registry.running_names()
         return {
             "available": report.ollama_available,
             "version": report.version,
             "error": report.error,
             "hint": report.hint,
-            "models": [_model_json(m) for m in (report.models or [])],
+            "models": [_model_json(m, loaded=m.name in loaded) for m in models],
             "selected": _model_json(report.selected) if report.selected else None,
-            "state": _state_json(session),
+            "state": await _state_json(session),
+        }
+    if cmd == "reconnect":
+        report = await session.reconnect(args.get("url"))
+        loaded = await session.registry.running_names() if report.ollama_available else set()
+        return {
+            "available": report.ollama_available,
+            "version": report.version,
+            "error": report.error,
+            "hint": report.hint,
+            "models": [_model_json(m, loaded=m.name in loaded) for m in (report.models or [])],
+            "selected": _model_json(report.selected) if report.selected else None,
+            "state": await _state_json(session),
         }
     if cmd == "models":
-        return [_model_json(m) for m in await session.refresh_models()]
+        return await _models_json(session)
     if cmd == "send":
-        async for event in session.send(
-            args.get("text", ""),
-            force_search=bool(args.get("forceSearch", False)),
-            search_query=args.get("searchQuery"),
-            images=[str(img) for img in (args.get("images") or []) if img],
-        ):
-            line = json.dumps({"type": "event", "event": _event_json(event)}, ensure_ascii=False)
-            await asyncio.get_running_loop().run_in_executor(None, _write_line, line)
-        return {"state": session.state.value, "lastMetrics": session.last_metrics or {}}
+        return await _stream_turn(
+            session,
+            session.send(
+                args.get("text", ""),
+                force_search=bool(args.get("forceSearch", False)),
+                search_query=args.get("searchQuery"),
+                images=[str(img) for img in (args.get("images") or []) if img],
+            ),
+        )
+    if cmd == "regenerate":
+        return await _stream_turn(
+            session,
+            session.regenerate(force_search=bool(args.get("forceSearch", False))),
+        )
+    if cmd == "edit_message":
+        return await _stream_turn(
+            session,
+            session.edit_last_user(
+                args.get("text", ""),
+                force_search=bool(args.get("forceSearch", False)),
+            ),
+        )
     if cmd == "cancel":
         return {"cancelled": session.cancel()}
     if cmd == "new_chat":
@@ -154,6 +233,8 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         return _conversation_full(conv) if conv else None
     if cmd == "delete_chat":
         return {"deleted": session.delete_conversation(args["id"])}
+    if cmd == "rename_chat":
+        return {"renamed": session.rename_conversation(args["id"], args.get("title", ""))}
     if cmd == "list_chats":
         return [_conversation_summary(c) for c in session.history()]
     if cmd == "get_config":
@@ -173,11 +254,21 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         web_tool = getattr(session, "web_tool", None)
         if web_tool is not None:
             setattr(web_tool, "max_sources", new_cfg.search_max_sources)
+        provider = getattr(session, "provider", None)
+        if provider is not None and provider.__class__.__name__ == "MultiSearchProvider":
+            from axiom.core.search.multi import MultiSearchProvider
+
+            session.provider = MultiSearchProvider(provider.providers, timeout=new_cfg.search_timeout)
+            if agent is not None:
+                agent._web_tool._provider = session.provider
+        history_store = getattr(session, "history_store", None)
+        if history_store is not None:
+            history_store.set_limit(new_cfg.history_limit if new_cfg.save_history else None)
         return json.loads(new_cfg.model_dump_json())
     if cmd == "set_model":
         return _model_json(await session.switch_model(args["name"]))
     if cmd == "state":
-        return _state_json(session)
+        return await _state_json(session)
     raise ValueError(f"Unknown command: {cmd}")
 
 
@@ -214,6 +305,10 @@ async def _run() -> None:
             raw = raw.strip()
             if raw:
                 on_line(raw)
+        # stdin closed — the shell is gone (killed, crashed or restarted).
+        # Exit immediately so no orphaned bridge keeps running and, worse,
+        # keeps answering stale requests against a dead UI.
+        os._exit(0)
 
     threading.Thread(target=pump, daemon=True).start()
     await asyncio.Event().wait()  # run until the shell closes stdin

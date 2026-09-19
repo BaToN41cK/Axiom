@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import httpx
 
 from axiom.core.errors import SearchUnavailableError
-from axiom.core.search.provider import SearchProvider, SearchResult, extract_text
+from axiom.core.search.provider import SearchProvider, SearchResult, _decode_body, extract_text
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -107,7 +107,7 @@ class DuckDuckGoProvider(SearchProvider):
                 content_type = response.headers.get("content-type", "")
                 if "html" not in content_type and "text" not in content_type:
                     return ""
-                return extract_text(response.text, max_chars=max_chars)
+                return extract_text(_decode_body(response), max_chars=max_chars)
         except httpx.HTTPError as exc:
             raise SearchUnavailableError(f"Could not read source: {url}") from exc
 

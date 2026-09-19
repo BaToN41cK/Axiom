@@ -14,6 +14,8 @@ the UI then shows "Search unavailable" instead of inventing an answer.
 
 from __future__ import annotations
 
+import httpx
+
 from axiom.core.errors import SearchUnavailableError
 from axiom.core.search.brave import BraveProvider
 from axiom.core.search.duckduckgo import DuckDuckGoProvider
@@ -31,8 +33,19 @@ class MultiSearchProvider(SearchProvider):
 
     name = "Web"
 
-    def __init__(self, providers: list[SearchProvider] | None = None) -> None:
+    #: Ceiling on raw page download, independent of the context trim.
+    MAX_DOWNLOAD_CHARS = 3_000_000
+
+    def __init__(self, providers: list[SearchProvider] | None = None, timeout: float | None = None) -> None:
         self._providers = list(providers) if providers else default_chain()
+        if timeout is not None and timeout > 0:
+            for provider in self._providers:
+                # Every built-in provider stores its httpx.Timeout as _timeout.
+                setter = getattr(provider, "_apply_timeout", None)
+                if setter is not None:
+                    setter(timeout)
+                elif hasattr(provider, "_timeout"):
+                    provider._timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
         #: Name of the provider that produced the last successful search.
         self.last_provider: str = ""
         #: Real errors of every provider that failed during the last search.
@@ -68,17 +81,23 @@ class MultiSearchProvider(SearchProvider):
         )
 
     async def fetch(self, url: str, max_chars: int = 4000) -> str:
-        """Read a page with the first provider that succeeds."""
+        """Read a page with the first provider that succeeds.
+
+        The raw download is capped (``MAX_DOWNLOAD_CHARS``) before HTML is
+        turned into text, so huge pages cannot blow up memory; the text itself
+        is still trimmed to ``max_chars``.
+        """
         last_error: Exception | None = None
         for provider in self._providers:
             try:
-                return await provider.fetch(url, max_chars=max_chars)
+                text = await provider.fetch(url, max_chars=self.MAX_DOWNLOAD_CHARS)
             except SearchUnavailableError as exc:
                 last_error = exc
                 continue
             except Exception as exc:
                 last_error = exc
                 continue
+            return text[:max_chars].rstrip() + "…" if len(text) > max_chars else text
         raise SearchUnavailableError(
             f"Could not read source: {url}",
             hint=str(last_error) if last_error else None,
