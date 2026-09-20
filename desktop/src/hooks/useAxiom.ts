@@ -271,10 +271,18 @@ export function useAxiom() {
       await Promise.resolve();
       setStep("ui", "ok", "AXIOM desktop");
 
+      // The local config read and the Ollama probe do not depend on each other,
+      // so they run together instead of as a chain of round trips.
       setStep("detect", "running");
       current = "detect";
-      const probe = await request<HealthReport>("health");
+      const [probe, cfg] = await Promise.all([
+        request<HealthReport>("health"),
+        request<AxiomConfig>("get_config"),
+      ]);
       setHealth(probe);
+      setConfig(cfg);
+      setSidebarOpen(cfg.sidebar_open);
+      setSidebarWidth(cfg.sidebar_width);
       if (!probe.available) {
         setStep("detect", "failed", probe.url);
         setConnected(false);
@@ -291,9 +299,10 @@ export function useAxiom() {
       setStep("connect", "running");
       setStep("connect", "ok", probe.version ? `Ollama ${probe.version}` : "соединение установлено");
 
+      // The model list and the saved history are independent as well.
       setStep("models", "running");
       current = "models";
-      const list = await request<ModelInfo[]>("models");
+      const [list] = await Promise.all([request<ModelInfo[]>("models"), refreshChats()]);
       setModels(list);
       setStep("models", "ok", list.length ? `${list.length} модел${list.length === 1 ? "ь" : "и"}` : "ничего не найдено");
       if (list.length === 0) {
@@ -310,15 +319,11 @@ export function useAxiom() {
 
       setStep("select", "running");
       current = "select";
-      const cfg = await request<AxiomConfig>("get_config");
-      setConfig(cfg);
-      setSidebarOpen(cfg.sidebar_open);
-      setSidebarWidth(cfg.sidebar_width);
       const preferred = cfg.model ? list.find((m) => m.name === cfg.model) : null;
       const chosen = preferred ?? list[0];
       const selected = await request<ModelInfo>("set_model", { name: chosen.name });
       setActiveModel(selected.name);
-      setModels((current) => current.map((m) => (m.name === selected.name ? { ...m, ...selected } : m)));
+      setModels((known) => known.map((m) => (m.name === selected.name ? { ...m, ...selected } : m)));
       void loadModelDetail(selected.name);
       setStep("select", "ok", selected.displayName);
       if (cfg.model && !preferred) {
@@ -326,8 +331,6 @@ export function useAxiom() {
       }
 
       setStep("workspace", "running");
-      current = "workspace";
-      await refreshChats();
       setStep("workspace", "ok", "готово");
       setConnected(true);
       setCoreLost(false);

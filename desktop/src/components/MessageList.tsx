@@ -3,10 +3,10 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  Brain,
   ChevronDown,
   Cpu,
   Pencil,
-  RefreshCw,
   Sparkles,
   Square,
 } from "lucide-react";
@@ -24,10 +24,6 @@ interface Props {
   config: AxiomConfig | null;
   modelName: string | null;
   modelCapabilities: string[];
-  canContinue: boolean;
-  canRegenerate: boolean;
-  onRegenerate: () => void;
-  onContinue: () => void;
   onEdit: (text: string) => void;
   onOpen: (url: string) => void;
   onSuggestion: (text: string, forceSearch?: boolean) => void;
@@ -73,10 +69,6 @@ export default function MessageList(props: Props) {
     config,
     modelName,
     modelCapabilities,
-    canContinue,
-    canRegenerate,
-    onRegenerate,
-    onContinue,
     onEdit,
     onOpen,
     onSuggestion,
@@ -163,10 +155,6 @@ export default function MessageList(props: Props) {
               liveState={liveState}
               statusText={statusText}
               elapsedMs={elapsedMs}
-              canContinue={canContinue}
-              canRegenerate={canRegenerate}
-              onRegenerate={onRegenerate}
-              onContinue={onContinue}
               onOpen={onOpen}
               onStop={onStop}
             />
@@ -296,10 +284,6 @@ function AssistantMessage({
   liveState,
   statusText,
   elapsedMs,
-  canContinue,
-  canRegenerate,
-  onRegenerate,
-  onContinue,
   onOpen,
   onStop,
 }: {
@@ -309,10 +293,6 @@ function AssistantMessage({
   liveState: string;
   statusText: string | null;
   elapsedMs: number;
-  canContinue: boolean;
-  canRegenerate: boolean;
-  onRegenerate: () => void;
-  onContinue: () => void;
   onOpen: (url: string) => void;
   onStop: () => void;
 }) {
@@ -455,11 +435,8 @@ function ThinkingSection({
   return (
     <div className={"thinking" + (active ? " live" : "")}>
       <button className="thinking-toggle" onClick={() => setOpen((v) => !v)} title="Размышления модели">
-        {active ? <span className="think-glyph live" /> : <span className="think-glyph done">✓</span>}
-        <span>{active ? "Размышляет…" : "Размышление ✓"}</span>
-        <span className="thinking-meta">
-          {thinking.split("\n").filter(Boolean).length} строк
-        </span>
+        <Brain size={14} strokeWidth={1.8} className={"thinking-icon" + (active ? " live" : "")} />
+        <span>{active ? "Размышляет…" : "Процесс размышления"}</span>
         <ChevronDown size={14} strokeWidth={1.8} className={"chevron" + (open ? " open" : "")} />
       </button>
       {(open || active) && <div className="thinking-body">{thinking}</div>}

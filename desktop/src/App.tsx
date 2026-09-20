@@ -1,5 +1,7 @@
 import { useEffect } from "react";
 import { Moon, Sun } from "lucide-react";
+import BootScreen from "./components/BootScreen";
+import OverlayPanel from "./components/OverlayPanel";
 import SettingsModal from "./components/SettingsModal";
 import Sidebar from "./components/Sidebar";
 import MessageList from "./components/MessageList";
@@ -20,6 +22,45 @@ export default function App() {
     const timer = window.setTimeout(() => root.classList.remove("theme-anim"), 480);
     return () => window.clearTimeout(timer);
   }, [theme]);
+
+  // Settings → General → animations off silences every transition at once.
+  useEffect(() => {
+    document.documentElement.classList.toggle("no-anim", s.config?.animations === false);
+  }, [s.config?.animations]);
+
+  const toasts = s.toasts.map((toast) => (
+    <div key={toast.id} className={"toast toast-" + toast.kind}>
+      {toast.text}
+    </div>
+  ));
+
+  // The boot sequence is a real screen: it shows while the probes run and
+  // explains a failure instead of leaving an empty window behind.
+  if (s.phase !== "ready") {
+    return (
+      <div className="app">
+        <BootScreen
+          phase={s.phase}
+          steps={s.bootSteps}
+          error={s.bootError}
+          onRetry={() => void s.runBoot()}
+          onRestartCore={() => void s.restartCore()}
+          onOpenSettings={() => s.openSettings()}
+        />
+        {s.settingsOpen && s.config && (
+          <SettingsModal
+            config={s.config}
+            section={s.settingsSection}
+            setSection={s.setSettingsSection}
+            onClose={() => s.setSettingsOpen(false)}
+            onSave={s.saveConfig}
+            onRestartCore={s.restartCore}
+          />
+        )}
+        {toasts}
+      </div>
+    );
+  }
 
   return (
     <div className="app">
@@ -83,10 +124,6 @@ export default function App() {
           config={s.config}
           modelName={s.activeModel}
           modelCapabilities={s.activeModelInfo?.capabilities ?? []}
-          canContinue={s.canContinue}
-          canRegenerate={s.canRegenerate}
-          onRegenerate={s.regenerate}
-          onContinue={s.continueGeneration}
           onEdit={s.editLastUser}
           onOpen={s.openExternal}
           onSuggestion={s.send}
@@ -137,11 +174,20 @@ export default function App() {
           onRestartCore={s.restartCore}
         />
       )}
-      {s.toasts.map((toast) => (
-        <div key={toast.id} className={"toast toast-" + toast.kind}>
-          {toast.text}
-        </div>
-      ))}
+
+      <OverlayPanel
+        overlay={s.overlay}
+        onClose={() => s.setOverlay(null)}
+        model={s.modelDetail}
+        context={s.context}
+        status={s.status}
+        statusError={s.statusError}
+        tools={s.tools}
+        toolsError={s.toolsError}
+        onReload={() => void s.loadStatus()}
+      />
+
+      {toasts}
     </div>
   );
 }

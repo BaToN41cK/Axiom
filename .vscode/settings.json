@@ -1,0 +1,22 @@
+{
+  "python.analysis.extraPaths": ["src"],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "python.terminal.activateEnvironment": true,
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/__pycache__": true,
+    "**/src-tauri/target": true,
+    "**/desktop/data": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/src-tauri/target/**": true,
+    "**/__pycache__/**": true,
+    "**/desktop/data/**": true
+  },
+  "typescript.tsdk": "desktop/node_modules/typescript/lib",
+  "files.eol": "\n"
+}

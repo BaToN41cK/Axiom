@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AXIOM Desktop (Tauri dev)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run tauri dev",
+      "cwd": "${workspaceFolder}/desktop",
+      "presentation": { "panel": "dedicated", "group": "axiom" }
+    },
+    {
+      "name": "AXIOM Desktop (frontend only)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/desktop",
+      "presentation": { "panel": "dedicated", "group": "axiom" }
+    },
+    {
+      "name": "AXIOM Core (TUI)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "axiom",
+      "cwd": "${workspaceFolder}",
+      "env": { "PYTHONPATH": "${workspaceFolder}/src" },
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "AXIOM tests (pytest)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    }
+  ]
+}

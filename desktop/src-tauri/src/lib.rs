@@ -52,6 +52,20 @@ fn find_python() -> String {
             return py;
         }
     }
+    // A repository virtualenv already has the `axiom` package installed
+    // (`pip install -e .`), so prefer it over whatever is first on PATH.
+    let root = find_root();
+    for rel in [
+        ".venv/Scripts/python.exe",
+        ".venv/bin/python",
+        "venv/Scripts/python.exe",
+        "venv/bin/python",
+    ] {
+        let candidate = root.join(rel);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
     for candidate in ["python.exe", "python", "py"] {
         if Command::new(candidate)
             .arg("--version")

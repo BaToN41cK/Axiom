@@ -1,0 +1,63 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "desktop: dev (Tauri)",
+      "detail": "Запустить GUI AXIOM (Tauri + Python-ядро)",
+      "type": "shell",
+      "command": "npm run tauri dev",
+      "options": { "cwd": "${workspaceFolder}/desktop" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "desktop: build",
+      "detail": "Собрать frontend + проверить типы",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/desktop" },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "desktop: bundle (installer)",
+      "detail": "Собрать установщик AXIOM",
+      "type": "shell",
+      "command": "npm run tauri build",
+      "options": { "cwd": "${workspaceFolder}/desktop" },
+      "problemMatcher": []
+    },
+    {
+      "label": "core: tests",
+      "detail": "pytest по ядру и фронтендам",
+      "type": "shell",
+      "command": "python -m pytest -q",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "core: lint (ruff)",
+      "detail": "ruff check src tests",
+      "type": "shell",
+      "command": "python -m ruff check src tests",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "core: types (pyright)",
+      "detail": "pyright src tests",
+      "type": "shell",
+      "command": "python -m pyright src tests",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "core: install (editable)",
+      "detail": "pip install -e . — нужен ядру для GUI",
+      "type": "shell",
+      "command": "python -m pip install -e .",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}
