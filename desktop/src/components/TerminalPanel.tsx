@@ -1,0 +1,75 @@
+import { useEffect, useRef, useState } from "react";
+import { Terminal, TriangleAlert } from "lucide-react";
+import type { TerminalResult } from "../types";
+
+interface Props {
+  cwd: string | null;
+  enabled: boolean;
+  history: { command: string; result: TerminalResult }[];
+  pendingConfirm: string | null;
+  onRun: (command: string) => void;
+  onConfirm: (allow: boolean) => void;
+}
+
+/** Real terminal in the workspace dir (§6–§7, §12). */
+export default function TerminalPanel(props: Props) {
+  const { cwd, enabled, history, pendingConfirm, onRun, onConfirm } = props;
+  const [draft, setDraft] = useState("");
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [history, pendingConfirm]);
+  const submit = () => {
+    const cmd = draft.trim();
+    if (!cmd) return;
+    setDraft("");
+    onRun(cmd);
+  };
+  return (
+    <section className="terminal">
+      <div className="term-head">
+        <Terminal size={13} strokeWidth={1.8} />
+        <span className="term-cwd" title={cwd ?? ""}>{cwd ?? "—"}</span>
+        {!enabled && <span className="term-off">выключен</span>}
+      </div>
+      <div className="term-body" ref={bodyRef}>
+        {history.map((h, i) => (
+          <div key={i} className="term-entry">
+            <div className="term-cmd"><span className="term-ps">›</span> {h.command}</div>
+            <pre className={"term-out" + (h.result.ok ? "" : " err")}>
+              {h.result.ok ? h.result.content : h.result.error ?? "(no output)"}
+            </pre>
+          </div>
+        ))}
+        {pendingConfirm && (
+          <div className="term-confirm">
+            <TriangleAlert size={14} strokeWidth={1.9} />
+            <div>
+              <div className="term-confirm-title">Выполнить команду?</div>
+              <code className="term-confirm-cmd">{pendingConfirm}</code>
+              <div className="term-confirm-row">
+                <button className="mini-btn" onClick={() => onConfirm(false)}>Отмена</button>
+                <button className="mini-btn danger" onClick={() => onConfirm(true)}>Выполнить</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {history.length === 0 && !pendingConfirm && (
+          <div className="term-empty">pytest · npm run dev · git status — команды выполняются в папке проекта</div>
+        )}
+      </div>
+      <div className="term-input-row">
+        <span className="term-ps">›</span>
+        <input
+          className="term-input"
+          value={draft}
+          disabled={!enabled}
+          placeholder={enabled ? "команда…" : "терминал отключён в настройках"}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+        />
+      </div>
+    </section>
+  );
+}

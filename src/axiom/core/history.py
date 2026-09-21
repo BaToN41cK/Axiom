@@ -46,6 +46,20 @@ class HistoryStore:
         self._dir = directory or (axiom_home() / "history")
         self._limit = limit
 
+    def use_workspace(self, root: Path | str | None) -> Path:
+        """Point this store at a per-project history dir (§13, §22).
+
+        Each project keeps its own conversations: ``~/.axiom/projects/<slug>``.
+        Returns the directory now in use. ``None`` restores the global dir.
+        """
+        from axiom.core.workspace import project_slug
+
+        if root is None:
+            self._dir = axiom_home() / "history"
+        else:
+            self._dir = axiom_home() / "projects" / project_slug(Path(root)) / "history"
+        return self._dir
+
     @property
     def directory(self) -> Path:
         return self._dir

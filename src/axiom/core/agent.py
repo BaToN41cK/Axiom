@@ -31,8 +31,15 @@ from axiom.core.models import ModelInfo
 from axiom.core.ollama import OllamaClient, ToolCallRequest
 from axiom.core.state import GenerationState
 from axiom.core.state_machine import GenerationStateMachine
+from axiom.core.tools.filesystem import WORKSPACE_TOOLS
+from axiom.core.tools.git_tools import GIT_TOOLS
+from axiom.core.tools.project_tools import PROJECT_TOOLS
 from axiom.core.tools.registry import ToolRegistry
-from axiom.core.tools.web_search import FETCH_URL_TOOL, WEB_SEARCH_TOOL, WebSearchTool
+from axiom.core.tools.web_search import (
+    FETCH_URL_TOOL,
+    WEB_SEARCH_TOOL,
+    WebSearchTool,
+)
 
 #: Hard limit on tool rounds — the agent must never loop forever.
 MAX_TOOL_ROUNDS = 3
@@ -57,8 +64,58 @@ DEFAULT_SYSTEM_PROMPT = (
     "may depend on current or factual online information.\n"
     "- fetch_url(url) — read a web page; ALWAYS use it when the user gives a "
     "link, so you answer from the actual page content, not from memory.\n"
-    "Do not say you cannot browse the web — you can, through these tools."
+    "Do not say you cannot browse the web — you can, through these tools.\n\n"
+    "You also have real workspace tools operating inside the user's project:\n"
+    "- list_files(path) — list a directory to explore the project.\n"
+    "- read_file(path) — read a file; ALWAYS read a file before editing it.\n"
+    "- write_file(path, content) — create a new file or rewrite one entirely.\n"
+    "- edit_file(path, old_text, new_text) — replace an exact unique snippet.\n"
+    "- search_text(pattern) / search_files(glob) — find code by content/name.\n"
+    "- create_directory(path), copy/move/delete (delete asks the user first).\n"
+    "- run_command(command) — run tests/builds in the workspace (safe ones "
+    "run at once, others ask the user first).\n"
+    "- inspect_project() — describe the current project.\n"
+    "- git_status/git_diff/git_log/git_branch — read-only git inspection.\n"
+    "When the user asks about their project, do not guess: list and read the "
+    "actual files. When asked to change code, read first, then edit or write. "
+    "All paths are relative to the workspace root."
 )
+
+WORKSPACE_PROMPT_ADDON = (
+    "\nWorkspace tools are enabled for this conversation. For project questions "
+    "use list_files/read_file instead of guessing; for changes use edit_file "
+    "with a unique exact snippet, or write_file for new files."
+)
+
+
+def workspace_context_block(root: str | None) -> str:
+    """Short factual block about the current workspace (no full project dump).
+
+    Keeps the model grounded in the real directory: path, project kind, git
+    branch and the top-level layout. Never sends file contents — the agent
+    must read what it needs via tools (spec §4: Project Index → AI Context).
+    """
+    if not root:
+        return ""
+    try:
+        from pathlib import Path as _Path
+
+        from axiom.core.workspace import detect_project as _detect
+
+        info = _detect(_Path(root))
+        lines = [
+            f"Current workspace: {info.path}",
+            f"Project: {info.name} ({info.kind})",
+        ]
+        if info.git:
+            lines.append(f"Git: yes{(' — branch ' + info.branch) if info.branch else ''}")
+        else:
+            lines.append("Git: no repository")
+        if info.entries:
+            lines.append("Top-level: " + ", ".join(info.entries[:24]))
+        return "\n".join(lines)
+    except Exception:
+        return f"Current workspace: {root}"
 
 SEARCH_SYSTEM_PROMPT = (
     "You are AXIOM. The web search results below were fetched in real time from "
@@ -102,6 +159,7 @@ class Agent:
         self._registry = registry
         self._machine = machine
         self._web_tool = web_tool
+        self._max_rounds = MAX_TOOL_ROUNDS + (3 if config.workspace_tools_enabled else 0)
         self.last_sources: list[SourceItem] = []
         self.last_content = ""
         self.last_thinking = ""
@@ -134,11 +192,18 @@ class Agent:
 
     def _tool_schemas(self, model: ModelInfo) -> list[dict] | None:
         """Only offer tools the model actually reports support for."""
-        if not self._config.web_search_enabled:
+        if not self._config.web_search_enabled and not self._config.workspace_tools_enabled:
             return None
         if model.supports("tools") is not True:
             return None
-        schemas = [s for s in self._registry.schemas() if s["function"]["name"] in OFFERED_TOOLS]
+        allowed: set[str] = set(OFFERED_TOOLS)
+        if self._config.workspace_tools_enabled:
+            allowed.update(WORKSPACE_TOOLS)
+            allowed.update(GIT_TOOLS)
+            allowed.update(PROJECT_TOOLS)
+            if self._config.terminal_enabled and self._config.access_mode != "read_only":
+                allowed.add("run_command")
+        schemas = [s for s in self._registry.schemas() if s["function"]["name"] in allowed]
         return schemas or None
 
     @staticmethod
@@ -214,6 +279,14 @@ class Agent:
             detail = str(call.arguments.get("query") or call.name)
         elif call.name == FETCH_URL_TOOL:
             detail = str(call.arguments.get("url") or call.name)
+        elif call.name == "run_command":
+            detail = str(call.arguments.get("command") or call.name)
+        elif call.name in ("read_file", "write_file", "edit_file", "delete_file"):
+            detail = str(call.arguments.get("path") or call.name)
+        elif call.name == "list_files":
+            detail = str(call.arguments.get("path") or ".")
+        elif call.name in ("search_text", "search_files"):
+            detail = str(call.arguments.get("pattern") or call.arguments.get("glob") or call.name)
         else:
             detail = call.name
         status = self._status(
@@ -327,6 +400,15 @@ class Agent:
         self._pasted_pages = []
 
         system = self._config.system_prompt or DEFAULT_SYSTEM_PROMPT
+        if self._config.workspace_tools_enabled and self._config.system_prompt is None:
+            system += WORKSPACE_PROMPT_ADDON
+        # §4: every request carries the real workspace path (path + kind +
+        # top-level layout, never the whole project). After a project switch
+        # this block points at the NEW folder, so the model works with it.
+        if self._config.workspace_tools_enabled:
+            block = workspace_context_block(self._config.workspace_root)
+            if block:
+                system = f"{system}\n\n{block}"
         if force_search:
             if not self._config.web_search_enabled or self._web_tool is None:
                 from axiom.core.events import ErrorEvent
@@ -396,7 +478,7 @@ class Agent:
 
             if not result.tool_calls:
                 break
-            if rounds >= MAX_TOOL_ROUNDS:
+            if rounds >= self._max_rounds:
                 break
             rounds += 1
 

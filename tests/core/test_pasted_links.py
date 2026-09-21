@@ -72,12 +72,15 @@ class FakeClient(OllamaClient):
 
 
 def make_session(
-    tmp_path: Path, *, capabilities: list[str] | None = None
+    tmp_path: Path,
+    *,
+    capabilities: list[str] | None = None,
+    workspace_tools: bool = False,
 ) -> tuple[ChatSession, FakeClient, FakeProvider]:
     client = FakeClient()
     provider = FakeProvider()
     session = ChatSession(
-        config=Config(model="test-model:latest"),
+        config=Config(model="test-model:latest", workspace_tools_enabled=workspace_tools),
         client=client,
         provider=provider,
         history_store=HistoryStore(directory=tmp_path / "history"),

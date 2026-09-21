@@ -16,6 +16,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from axiom.core.agent import Agent
@@ -39,11 +40,34 @@ from axiom.core.search.multi import MultiSearchProvider
 from axiom.core.search.provider import SearchProvider
 from axiom.core.state import GenerationState
 from axiom.core.state_machine import GenerationStateMachine
+from axiom.core.tools.base import ToolPermission
+from axiom.core.tools.filesystem import WORKSPACE_TOOLS, WorkspaceTools
+from axiom.core.tools.git_tools import (
+    GIT_BRANCH_TOOL,
+    GIT_DIFF_TOOL,
+    GIT_LOG_TOOL,
+    GIT_STATUS_TOOL,
+    GitTools,
+)
+from axiom.core.tools.project_tools import INSPECT_PROJECT_TOOL, ProjectTools
 from axiom.core.tools.registry import ToolRegistry
+from axiom.core.tools.terminal import RUN_COMMAND_TOOL, TerminalTool, classify_command
 from axiom.core.tools.web_search import WebSearchTool
+from axiom.core.workspace import ProjectInfo, WorkspaceManager, detect_project
 
 #: How many previous messages are sent back to the model.
 CONTEXT_MESSAGES = 40
+
+#: Every tool that touches the workspace filesystem. Global Chat (no project)
+#: drops exactly these from the registry; :meth:`set_workspace` puts them back.
+WORKSPACE_TOOL_NAMES: frozenset[str] = frozenset(WORKSPACE_TOOLS) | {
+    GIT_STATUS_TOOL,
+    GIT_DIFF_TOOL,
+    GIT_LOG_TOOL,
+    GIT_BRANCH_TOOL,
+    INSPECT_PROJECT_TOOL,
+    RUN_COMMAND_TOOL,
+}
 
 
 @dataclass
@@ -80,6 +104,43 @@ class ChatSession:
         self.web_tool = WebSearchTool(self.provider, max_sources=self.config.search_max_sources)
         self.tools = ToolRegistry()
         self.web_tool.register(self.tools)
+        # §8 Tool Layer: file tools + terminal tools + project tools +
+        # git tools + web tools — all behind the permission system (§9-§12).
+        # Workspace tools always exist: an explicit ``workspace_root`` wins,
+        # otherwise they are rooted at the launch directory
+        # (``default_workspace_root`` — the Tauri shell exports
+        # ``AXIOM_WORKSPACE``; CLI/TUI fall back to the current directory).
+        # A real project switch happens via :meth:`set_workspace`.
+        self.workspace_tools: WorkspaceTools | None = None
+        self.git_tools = None
+        self.project_tools = None
+        if self.config.workspace_tools_enabled:
+            root = (
+                Path(self.config.workspace_root).expanduser()
+                if self.config.workspace_root
+                else None  # WorkspaceTools resolves None -> default_workspace_root()
+            )
+            self.workspace_tools = WorkspaceTools(root, access_mode=self.config.access_mode)
+            self.workspace_tools.register(self.tools)
+            from axiom.core.tools.git_tools import GitTools
+            from axiom.core.tools.project_tools import ProjectTools
+
+            self.git_tools = GitTools(root)
+            self.git_tools.register(self.tools)
+            self.project_tools = ProjectTools(root)
+            self.project_tools.register(self.tools)
+        self.terminal: TerminalTool | None = None
+        if self.config.workspace_tools_enabled and self.config.terminal_enabled:
+            self.terminal = TerminalTool(
+                root=Path(self.config.workspace_root).expanduser()
+                if self.config.workspace_root
+                else None,
+                enabled=self.config.access_mode != "read_only",
+            )
+            self.terminal.register(self.tools)
+        self.workspaces = WorkspaceManager()
+        if self.config.workspace_root:
+            self.workspaces.remember(Path(self.config.workspace_root))
         self.machine = GenerationStateMachine()
         self.agent = Agent(
             self.client,
@@ -230,6 +291,128 @@ class ChatSession:
         if renamed and conversation_id == self.conversation.id:
             self.conversation.title = " ".join(title.split())[:80]
         return renamed
+
+    # -------------------------------------------------------------- workspace
+
+    @property
+    def workspace_root(self) -> Path | None:
+        if self.workspace_tools is not None:
+            return self.workspace_tools.root
+        return None
+
+    def workspace_info(self) -> ProjectInfo | None:
+        root = self.workspace_root
+        return detect_project(root) if root and root.exists() else None
+
+    def recent_workspaces(self) -> list[ProjectInfo]:
+        return self.workspaces.recent()
+
+    def pinned_workspaces(self) -> list[ProjectInfo]:
+        return self.workspaces.pinned_projects()
+
+    def is_workspace_pinned(self, path: str) -> bool:
+        return self.workspaces.is_pinned(path)
+
+    def pin_workspace(self, path: str) -> bool:
+        return self.workspaces.pin(path)
+
+    def unpin_workspace(self, path: str) -> bool:
+        return self.workspaces.unpin(path)
+
+    def search_projects(self, query: str) -> list[ProjectInfo]:
+        return self.workspaces.search_projects(query)
+
+    def create_project(self, path: str) -> ProjectInfo:
+        """Create a new project directory and remember it."""
+        return self.workspaces.create_project(Path(path).expanduser().resolve())
+
+    def remove_workspace(self, path: str) -> bool:
+        return self.workspaces.remove(path)
+
+    def set_workspace(self, path: str) -> ProjectInfo:
+        """Switch the whole session to a real directory (AI + terminal + explorer)."""
+        target = Path(path).expanduser().resolve()
+        if not target.is_dir():
+            from axiom.core.errors import AxiomError
+
+            raise AxiomError(f"Not a directory: {target}")
+        # §13/§22: keep the previous conversation on disk, then move this
+        # session to the new project's own history dir — histories never mix.
+        self._save_conversation()
+        self.history_store.use_workspace(target)
+        self.conversation = Conversation(model=self.active_model.name if self.active_model else None)
+        self._save_conversation()
+        self.config.workspace_root = str(target)
+        # Leaving Global Chat re-enables workspace tooling for the new project.
+        self.config.workspace_tools_enabled = True
+        self.config.save()
+        if self.workspace_tools is not None:
+            self.workspace_tools.set_root(target)
+            # Re-register: clear_workspace() dropped these names from the registry.
+            self.workspace_tools.register(self.tools)
+        else:
+            # Tools were never created (config disabled them earlier) — build now.
+            self.workspace_tools = WorkspaceTools(target, access_mode=self.config.access_mode)
+            self.workspace_tools.register(self.tools)
+            self.git_tools = GitTools(target)
+            self.git_tools.register(self.tools)
+            self.project_tools = ProjectTools(target)
+            self.project_tools.register(self.tools)
+        if self.git_tools is not None:
+            self.git_tools.set_root(target)
+            self.git_tools.register(self.tools)
+        if self.project_tools is not None:
+            self.project_tools.set_root(target)
+            self.project_tools.register(self.tools)
+        if self.terminal is not None:
+            self.terminal.set_root(target)
+            self.terminal.enabled = self.config.access_mode != "read_only"
+            self.terminal.register(self.tools)
+        elif self.config.terminal_enabled and self.config.access_mode != "read_only":
+            self.terminal = TerminalTool(root=target, enabled=True)
+            self.terminal.register(self.tools)
+        self.workspaces.remember(target)
+        return detect_project(target)
+
+    def clear_workspace(self) -> None:
+        """Leave project mode: Global Chat with no filesystem/terminal tools.
+
+        The conversation stays on disk (project history dir), the store points
+        back at the global history dir, and every workspace tool is removed
+        from the registry so the model chats over Ollama only.
+        """
+        self._save_conversation()
+        self.history_store.use_workspace(None)
+        self.conversation = Conversation(model=self.active_model.name if self.active_model else None)
+        self._save_conversation()
+        self.config.workspace_root = None
+        # Persist Global Chat across restarts: no workspace tools on boot.
+        self.config.workspace_tools_enabled = False
+        self.config.save()
+        for name in WORKSPACE_TOOL_NAMES:
+            self.tools.unregister(name)
+        if self.terminal is not None:
+            self.terminal.enabled = False
+
+    async def run_terminal(self, command: str, confirmed: bool = False) -> dict:
+        """Run a real shell command in the workspace (GUI terminal panel).
+
+        Safe commands run immediately; anything else returns ``permission:
+        "ask"`` so the GUI can confirm with the user first.
+        """
+        if self.terminal is None:
+            return {"ok": False, "error": "Terminal access is disabled", "permission": "blocked"}
+        if classify_command(command) == ToolPermission.ALWAYS or confirmed:
+            result = await self.terminal._run(command)
+            return {
+                "ok": result.ok,
+                "content": result.content,
+                "error": result.error,
+                "exit_code": (result.data or {}).get("exit_code"),
+                "cwd": (result.data or {}).get("cwd"),
+                "permission": "granted",
+            }
+        return {"ok": False, "permission": "ask", "command": command}
 
     def _save_conversation(self) -> None:
         if not self.config.save_history:

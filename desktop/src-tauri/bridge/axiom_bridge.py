@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import threading
+from pathlib import Path
 
 from axiom.core.chat import ChatSession
 from axiom.core.config import Config
@@ -154,12 +155,13 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         if available:
             try:
                 version = await session.client.version()
-            except Exception:  # noqa: BLE001 - a version probe must never fail the UI
+            except Exception:
                 version = None
         return {"available": available, "version": version, "url": session.client.base_url}
     if cmd == "status":
+        state = await _state_json(session)
         return {
-            **_state_json(session),
+            **state,
             "ollamaUrl": session.client.base_url,
             "version": await session.client.version() if await session.client.is_available() else None,
             "activeModel": _model_json(session.active_model) if session.active_model else None,
@@ -237,6 +239,96 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         return {"renamed": session.rename_conversation(args["id"], args.get("title", ""))}
     if cmd == "list_chats":
         return [_conversation_summary(c) for c in session.history()]
+    if cmd == "workspace_info":
+        info = session.workspace_info()
+        # Return only current workspace during boot (no recent workspaces to avoid git hangs)
+        return {"current": info.to_json() if info else None}
+    if cmd == "recent_workspaces":
+        info = session.workspace_info()
+        return {"current": info.to_json() if info else None,
+                "recent": [p.to_json() for p in session.recent_workspaces()]}
+    if cmd == "pinned_workspaces":
+        info = session.workspace_info()
+        return {"current": info.to_json() if info else None,
+                "pinned": [p.to_json() for p in session.pinned_workspaces()]}
+    if cmd == "set_workspace":
+        info = session.set_workspace(args["path"])
+        return info.to_json()
+    if cmd == "clear_workspace":
+        session.clear_workspace()
+        return {"current": None}
+    if cmd == "remove_workspace":
+        return {"removed": session.remove_workspace(args["path"])}
+    if cmd == "pin_workspace":
+        return {"pinned": session.pin_workspace(args["path"])}
+    if cmd == "unpin_workspace":
+        return {"pinned": session.unpin_workspace(args["path"])}
+    if cmd == "is_pinned":
+        return {"pinned": session.is_workspace_pinned(args["path"])}
+    if cmd == "search_projects":
+        results = session.search_projects(args.get("query", ""))
+        return {"matches": [i.to_json() for i in results], "total": len(results)}
+    if cmd == "create_project":
+        info = session.create_project(args["path"])
+        return info.to_json()
+    if cmd == "run_terminal":
+        return await session.run_terminal(
+            args.get("command", ""), confirmed=bool(args.get("confirmed", False)),
+        )
+    if cmd == "workspace_tree":
+        root = session.workspace_root
+        if root is None or not root.exists():
+            return {"tree": [], "root": None}
+        from axiom.core.tools.filesystem import IGNORED_DIRS
+
+        def _tree(path, depth: int, prefix: str = "") -> list[dict]:
+            if depth <= 0:
+                return []
+            try:
+                entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+            except OSError:
+                return []
+            out: list[dict] = []
+            for entry in entries:
+                if entry.name.startswith(".") and entry.name not in (".vscode",):
+                    continue
+                if entry.is_dir() and entry.name in IGNORED_DIRS:
+                    continue
+                node: dict = {"name": entry.name, "dir": entry.is_dir(), "path": str(entry.relative_to(root))}
+                if entry.is_dir() and depth > 1:
+                    node["children"] = _tree(entry, depth - 1)
+                out.append(node)
+                if len(out) >= 300:
+                    break
+            return out
+
+        depth = max(1, min(int(args.get("depth", 3) or 3), 5))
+        return {"tree": _tree(root, depth), "root": str(root)}
+    if cmd == "workspace_file":
+        root = session.workspace_root
+        if root is None:
+            return {"ok": False, "error": "No workspace is open"}
+        target = (root / str(args.get("path", ""))).resolve()
+        if target != root and root not in target.parents:
+            return {"ok": False, "error": "Path is outside the workspace"}
+        if target.is_dir():
+            return {"ok": False, "error": "Path is a directory"}
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        if len(text) > 60_000:
+            text = text[:60_000] + "\n… truncated"
+        return {"ok": True, "path": str(target.relative_to(root)), "content": text}
+    if cmd == "git_panel":
+        info = session.workspace_info()
+        data: dict = {"project": info.to_json() if info else None, "status": None, "log": None}
+        if session.git_tools is not None:
+            status = await session.git_tools._status()
+            data["status"] = {"ok": status.ok, "content": status.content, "error": status.error}
+            log = await session.git_tools._log(10)
+            data["log"] = {"ok": log.ok, "content": log.content, "error": log.error}
+        return data
     if cmd == "get_config":
         return json.loads(session.config.model_dump_json())
     if cmd == "set_config":
@@ -250,20 +342,41 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         # Agent and web tool read live attributes; update them defensively.
         agent = getattr(session, "agent", None)
         if agent is not None:
-            setattr(agent, "config", new_cfg)
+            agent.config = new_cfg
         web_tool = getattr(session, "web_tool", None)
         if web_tool is not None:
-            setattr(web_tool, "max_sources", new_cfg.search_max_sources)
+            web_tool.max_sources = new_cfg.search_max_sources
         provider = getattr(session, "provider", None)
         if provider is not None and provider.__class__.__name__ == "MultiSearchProvider":
             from axiom.core.search.multi import MultiSearchProvider
 
             session.provider = MultiSearchProvider(provider.providers, timeout=new_cfg.search_timeout)
-            if agent is not None:
+            if agent is not None and getattr(agent, "_web_tool", None) is not None:
                 agent._web_tool._provider = session.provider
         history_store = getattr(session, "history_store", None)
         if history_store is not None:
             history_store.set_limit(new_cfg.history_limit if new_cfg.save_history else None)
+        # Live workspace settings — root / terminal / access mode.
+        ws_tools = getattr(session, "workspace_tools", None)
+        if ws_tools is not None and new_cfg.workspace_tools_enabled and new_cfg.workspace_root:
+            ws_tools.set_root(Path(new_cfg.workspace_root).expanduser())
+        terminal = getattr(session, "terminal", None)
+        if terminal is not None:
+            if not new_cfg.terminal_enabled or new_cfg.access_mode == "read_only":
+                terminal.enabled = False
+            else:
+                terminal.enabled = True
+                if new_cfg.workspace_root:
+                    terminal.set_root(Path(new_cfg.workspace_root).expanduser())
+        elif new_cfg.terminal_enabled and new_cfg.workspace_tools_enabled and new_cfg.access_mode != "read_only":
+            from axiom.core.tools.terminal import TerminalTool
+
+            new_terminal = TerminalTool(
+                root=Path(new_cfg.workspace_root).expanduser() if new_cfg.workspace_root else None,
+                enabled=True,
+            )
+            session.terminal = new_terminal
+            new_terminal.register(session.tools)
         return json.loads(new_cfg.model_dump_json())
     if cmd == "set_model":
         return _model_json(await session.switch_model(args["name"]))
@@ -283,7 +396,7 @@ async def _run() -> None:
                 {"type": "reply", "req": req_id, "ok": True, "data": data},
                 ensure_ascii=False,
             )
-        except Exception as exc:  # noqa: BLE001 - bridge must never die on one bad request
+        except Exception as exc:
             reply = json.dumps(
                 {"type": "reply", "req": req_id, "ok": False, "error": str(exc)},
                 ensure_ascii=False,
@@ -297,7 +410,7 @@ async def _run() -> None:
             cmd = str(request.get("cmd", ""))
             args = request.get("args") or {}
             asyncio.run_coroutine_threadsafe(dispatch(req_id, _handle(session, cmd, args)), loop)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _write_line(json.dumps({"type": "reply", "req": 0, "ok": False, "error": str(exc)}))
 
     def pump() -> None:

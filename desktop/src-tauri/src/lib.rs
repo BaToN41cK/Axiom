@@ -127,6 +127,11 @@ fn spawn_bridge(app: &AppHandle) -> Result<(), String> {
     }
     cmd.env("PYTHONIOENCODING", "utf-8");
     cmd.env("PYTHONUTF8", "1");
+    // Workspace filesystem tools operate on the project AXIOM was launched from
+    // (the repo root found above) unless the user set an explicit workspace.
+    if std::env::var("AXIOM_WORKSPACE").is_err() {
+        cmd.env("AXIOM_WORKSPACE", &repo_root);
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -241,6 +246,18 @@ fn open_url(url: String) -> Result<(), String> {
     spawn.map(|_| ()).map_err(|e| format!("could not open the link: {e}"))
 }
 
+/// Open a native folder picker and return the chosen directory (if any).
+#[tauri::command]
+fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("Открыть проект — выбрать папку")
+        .blocking_pick_folder();
+    Ok(selection.map(|p| p.to_string()))
+}
+
 /// Close AXIOM (used by the `/exit` command and the window-close shortcut).
 #[tauri::command]
 fn quit_app(app: AppHandle) {
@@ -250,6 +267,7 @@ fn quit_app(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             app.manage(Bridge {
@@ -285,6 +303,7 @@ pub fn run() {
             bridge_request,
             bridge_restart,
             open_url,
+            pick_folder,
             quit_app
         ])
         .run(tauri::generate_context!())

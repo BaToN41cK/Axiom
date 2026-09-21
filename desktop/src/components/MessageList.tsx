@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  Brain,
   ChevronDown,
   Cpu,
+  Globe,
   Pencil,
   Sparkles,
   Square,
@@ -24,6 +24,8 @@ interface Props {
   config: AxiomConfig | null;
   modelName: string | null;
   modelCapabilities: string[];
+  /** Global Chat mode: no project folder is active. */
+  globalChat?: boolean;
   onEdit: (text: string) => void;
   onOpen: (url: string) => void;
   onSuggestion: (text: string, forceSearch?: boolean) => void;
@@ -69,6 +71,7 @@ export default function MessageList(props: Props) {
     config,
     modelName,
     modelCapabilities,
+    globalChat = false,
     onEdit,
     onOpen,
     onSuggestion,
@@ -101,7 +104,7 @@ export default function MessageList(props: Props) {
 
   if (messages.length === 0) {
     return (
-      <div className="chat-scroll" ref={scrollRef}>
+      <div className="chat-scroll">
         <div className="chat-inner welcome-wrap">
           <div className="welcome">
             <div className="welcome-mark">
@@ -116,11 +119,18 @@ export default function MessageList(props: Props) {
                 <span className="welcome-caps">{modelCapabilities.join(" · ")}</span>
               )}
             </div>
+            {globalChat && (
+              <div className="welcome-global" title="Файловые и терминальные инструменты отключены">
+                <Globe size={12} strokeWidth={1.8} />
+                <span>Глобальный чат — проект не активен, инструменты файлов выключены</span>
+              </div>
+            )}
             <div className="welcome-suggestions">
-              {SUGGESTIONS.map((item) => (
+              {SUGGESTIONS.map((item, index) => (
                 <button
                   key={item.text}
                   className="suggestion"
+                  style={{ animationDelay: `${0.08 * index + 0.1}s` }}
                   onClick={() => onSuggestion(item.text, item.search)}
                   title={item.search ? "Отправит с принудительным веб-поиском" : "Отправить этот запрос"}
                 >
@@ -304,9 +314,24 @@ function AssistantMessage({
     <div className="msg assistant">
       <div className="msg-head">
         <span className="msg-role">AXIOM</span>
-        <div className="msg-tools">
-          {message.content && <CopyIconButton text={message.content} title="Копировать ответ" />}
-        </div>
+        {streaming && (
+          <span className="live-pill">
+            <span className="live-dot" />
+            <span>{statusText ?? liveStateLabel(liveState)}</span>
+            <span className="live-sep" />
+            <span className="live-time">{formatElapsed(elapsedMs)}</span>
+            {generating && (
+              <button className="stop-inline" onClick={onStop} title="Остановить (Esc)">
+                <Square size={10} strokeWidth={2.2} fill="currentColor" />
+              </button>
+            )}
+          </span>
+        )}
+        {message.content && !streaming && (
+          <div className="msg-tools">
+            <CopyIconButton text={message.content} title="Копировать ответ" />
+          </div>
+        )}
       </div>
 
       <ThinkingSection
@@ -321,8 +346,14 @@ function AssistantMessage({
       {message.sources.length > 0 && <SourcesList sources={message.sources} onOpen={onOpen} />}
 
       {message.content &&
-        (config?.render_markdown ?? true ? (
-          <div className={"markdown" + (streaming ? " streaming" : "")}>
+        (streaming ? (
+          // While tokens arrive: plain incremental text (no markdown re-parse -> no flicker).
+          <div className="stream-view">
+            {message.content}
+            <span className="caret" />
+          </div>
+        ) : config?.render_markdown ?? true ? (
+          <div className="markdown">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
@@ -356,25 +387,6 @@ function AssistantMessage({
             {streaming && <span className="caret" />}
           </div>
         ))}
-
-      {streaming && (
-        <div className="msg-live">
-          <span className="live-dot" />
-          {statusText ? (
-            <span className="live-label">{statusText}</span>
-          ) : (
-            <span className="live-label">{liveStateLabel(liveState)}</span>
-          )}
-          <span className="live-sep" />
-          <span className="live-time">{formatElapsed(elapsedMs)}</span>
-          {generating && (
-            <button className="stop-inline" onClick={onStop} title="Остановить (Esc)">
-              <Square size={10} strokeWidth={2.2} fill="currentColor" />
-              <span>Стоп</span>
-            </button>
-          )}
-        </div>
-      )}
 
       {!streaming && cancelled && !message.content && (
         <div className="msg-note">
@@ -425,21 +437,42 @@ function ThinkingSection({
 }) {
   const active = streaming && thinking.length > 0;
   const [open, setOpen] = useState(expandedByDefault);
+  const bodyRef = useRef<HTMLDivElement>(null);
 
+  // While reasoning streams in, the trace is force-expanded so the user
+  // sees the model's actual thoughts live; afterwards respect the setting.
   useEffect(() => {
     setOpen(active ? true : expandedByDefault);
   }, [active, expandedByDefault]);
 
+  // Keep the tail of the reasoning text in view while it grows.
+  useEffect(() => {
+    if (active && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+  }, [thinking, active]);
+
   if (!visible || !thinking) return null;
+  const shown = open || active;
 
   return (
-    <div className={"thinking" + (active ? " live" : "")}>
-      <button className="thinking-toggle" onClick={() => setOpen((v) => !v)} title="Размышления модели">
-        <Brain size={14} strokeWidth={1.8} className={"thinking-icon" + (active ? " live" : "")} />
-        <span>{active ? "Размышляет…" : "Процесс размышления"}</span>
-        <ChevronDown size={14} strokeWidth={1.8} className={"chevron" + (open ? " open" : "")} />
+    <div className={"think" + (active ? " live" : "")}>
+      <button
+        className="think-head"
+        onClick={() => setOpen((v) => !v)}
+        title={open ? "Свернуть размышления" : "Показать размышления"}
+      >
+        <span className="think-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="think-title">{active ? "Размышляет" : "Процесс размышления"}</span>
+        <ChevronDown size={13} strokeWidth={1.8} className={"think-chev" + (open ? " open" : "")} />
       </button>
-      {(open || active) && <div className="thinking-body">{thinking}</div>}
+      <div className={"think-wrap" + (shown ? " open" : "")}>
+        <div ref={bodyRef} className="think-text">
+          {thinking}
+        </div>
+      </div>
     </div>
   );
 }

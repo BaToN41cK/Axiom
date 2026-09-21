@@ -1,5 +1,16 @@
 import { useState, useEffect } from "react";
-import { X, RefreshCw } from "lucide-react";
+import {
+  Info,
+  Keyboard,
+  MessageSquare,
+  RefreshCw,
+  Settings2,
+  SlidersHorizontal,
+  Sparkles,
+  Wrench,
+  X,
+} from "lucide-react";
+import type { ReactNode } from "react";
 import type { AxiomConfig } from "../types";
 import type { SettingsSection } from "../hooks/useAxiom";
 
@@ -12,13 +23,27 @@ interface Props {
   onRestartCore: () => void;
 }
 
-const SECTIONS: { key: SettingsSection; label: string }[] = [
-  { key: "general", label: "Общие" },
-  { key: "models", label: "Модели" },
-  { key: "chat", label: "Чат" },
-  { key: "tools", label: "Инструменты" },
-  { key: "appearance", label: "Вид" },
-  { key: "about", label: "О программе" },
+const SECTIONS: { key: SettingsSection; label: string; icon: ReactNode }[] = [
+  { key: "general", label: "Общие", icon: <Settings2 size={14} strokeWidth={1.8} /> },
+  { key: "appearance", label: "Вид", icon: <Sparkles size={14} strokeWidth={1.8} /> },
+  { key: "models", label: "Модели", icon: <SlidersHorizontal size={14} strokeWidth={1.8} /> },
+  { key: "chat", label: "Чат", icon: <MessageSquare size={14} strokeWidth={1.8} /> },
+  { key: "tools", label: "Инструменты", icon: <Wrench size={14} strokeWidth={1.8} /> },
+  { key: "shortcuts", label: "Горячие клавиши", icon: <Keyboard size={14} strokeWidth={1.8} /> },
+  { key: "about", label: "О программе", icon: <Info size={14} strokeWidth={1.8} /> },
+];
+
+const SHORTCUTS: { keys: [string, string] | string; label: string }[] = [
+  { keys: "Ctrl+N", label: "Новый разговор" },
+  { keys: "Ctrl+B", label: "Показать/скрыть боковую панель" },
+  { keys: "Ctrl+K", label: "Поиск по разговорам" },
+  { keys: "Ctrl+,", label: "Настройки" },
+  { keys: "Ctrl+/", label: "Фокус в поле ввода" },
+  { keys: "Enter", label: "Отправить сообщение" },
+  { keys: "Shift+Enter", label: "Перенос строки" },
+  { keys: "Ctrl+Enter", label: "Отправить с веб-поиском" },
+  { keys: "Esc", label: "Остановить генерацию / закрыть окно" },
+  { keys: "Ctrl+V", label: "Вставить изображение (vision-модели)" },
 ];
 
 export default function SettingsModal({
@@ -52,6 +77,10 @@ export default function SettingsModal({
       model: draft.model,
       think: draft.think,
       web_search_enabled: draft.web_search_enabled,
+      workspace_tools_enabled: draft.workspace_tools_enabled,
+      workspace_root: draft.workspace_root,
+      access_mode: draft.access_mode,
+      terminal_enabled: draft.terminal_enabled,
       search_max_sources: Number(draft.search_max_sources),
       search_read_sources: Number(draft.search_read_sources),
       search_timeout: Number(draft.search_timeout),
@@ -94,6 +123,7 @@ export default function SettingsModal({
                 className={"settings-nav-item" + (section === s.key ? " active" : "")}
                 onClick={() => setSection(s.key)}
               >
+                <span className="settings-nav-icon">{s.icon}</span>
                 {s.label}
               </button>
             ))}
@@ -105,6 +135,7 @@ export default function SettingsModal({
             {section === "chat" && <ChatSection draft={draft} set={set} />}
             {section === "tools" && <ToolsSection draft={draft} set={set} />}
             {section === "appearance" && <AppearanceSection draft={draft} set={set} />}
+            {section === "shortcuts" && <ShortcutsSection />}
             {section === "about" && <AboutSection />}
           </div>
         </div>
@@ -259,6 +290,25 @@ function ToolsSection({ draft, set }: SectionProps) {
       <Row label="Веб-поиск" hint="Инструмент поиска в интернете (требует сеть, остальное — локально)">
         <Toggle value={draft.web_search_enabled} onChange={(v) => set("web_search_enabled", v)} />
       </Row>
+      <Row
+        label="Файлы проекта"
+        hint="Разрешить модели читать и редактировать файлы этой папки: list_files, read_file, write_file, edit_file"
+      >
+        <Toggle
+          value={draft.workspace_tools_enabled}
+          onChange={(v) => set("workspace_tools_enabled", v)}
+        />
+      </Row>
+      <Row label="Доступ AI" hint="read_only — только чтение · workspace — внутри проекта · full — весь ПК (осторожно)">
+        <select value={draft.access_mode} onChange={(e) => set("access_mode", e.target.value as AxiomConfig["access_mode"])}>
+          <option value="read_only">Только чтение</option>
+          <option value="workspace">Проект (workspace)</option>
+          <option value="full">Полный доступ</option>
+        </select>
+      </Row>
+      <Row label="Терминал AI" hint="Разрешить модели выполнять команды в папке проекта">
+        <Toggle value={draft.terminal_enabled} onChange={(v) => set("terminal_enabled", v)} />
+      </Row>
       <Row label="Источников на запрос" hint="Сколько результатов возвращает поиск">
         <input
           type="number"
@@ -355,6 +405,25 @@ function AboutSection() {
         и история разговоров — всё выполняется на вашей машине. Без API-ключей,
         облаков и обязательного интернета.
       </p>
+    </div>
+  );
+}
+
+function ShortcutsSection() {
+  return (
+    <div className="shortcuts-list">
+      {SHORTCUTS.map((item) => (
+        <div className="settings-row" key={item.label}>
+          <div className="settings-row-text">
+            <div className="settings-row-label">{item.label}</div>
+          </div>
+          <div className="settings-row-control">
+            <span className="shortcut-keys">
+              <kbd>{item.keys}</kbd>
+            </span>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

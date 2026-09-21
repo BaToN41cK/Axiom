@@ -33,6 +33,14 @@ class Config(BaseModel):
     think: bool | None = None
     #: Enable the web-search capability (search still only runs when needed)
     web_search_enabled: bool = True
+    #: Give the model real filesystem tools inside the workspace
+    workspace_tools_enabled: bool = True
+    #: Root directory the model may read/edit (None = launch directory)
+    workspace_root: str | None = None
+    #: AI access level: read_only < workspace < full (outside workspace too)
+    access_mode: Literal["read_only", "workspace", "full"] = "workspace"
+    #: Allow the model (and the terminal panel) to run shell commands
+    terminal_enabled: bool = True
     #: How many search sources to keep / how many pages to actually read
     search_max_sources: int = Field(default=5, ge=1, le=10)
     search_read_sources: int = Field(default=3, ge=0, le=10)

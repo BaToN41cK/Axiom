@@ -1,6 +1,7 @@
-import { useEffect } from "react";
-import { Moon, Sun } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Moon, PanelRightClose, PanelRightOpen, Sun } from "lucide-react";
 import BootScreen from "./components/BootScreen";
+import ProjectSelector from "./components/ProjectSelector";
 import OverlayPanel from "./components/OverlayPanel";
 import SettingsModal from "./components/SettingsModal";
 import Sidebar from "./components/Sidebar";
@@ -8,6 +9,57 @@ import MessageList from "./components/MessageList";
 import Composer from "./components/Composer";
 import ModelSelector from "./components/ModelSelector";
 import { useAxiom } from "./hooks/useAxiom";
+
+import Explorer from "./components/Explorer";
+import GitPanel from "./components/GitPanel";
+import TerminalPanel from "./components/TerminalPanel";
+import type { AxiomStore } from "./hooks/useAxiom";
+
+function WorkbenchSide({ store: s }: { store: AxiomStore }) {
+  const [tab, setTab] = useState<"files" | "terminal" | "git">("files");
+  return (
+    <aside className="workbench-side">
+      <div className="side-tabs">
+        <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>Файлы</button>
+        <button className={tab === "terminal" ? "active" : ""} onClick={() => setTab("terminal")}>Терминал</button>
+        <button className={tab === "git" ? "active" : ""} onClick={() => setTab("git")}>Git</button>
+      </div>
+      {tab === "files" && (
+        <Explorer
+          root={s.workspace?.current?.path ?? null}
+          tree={s.tree}
+          loading={s.treeLoading}
+          openFile={s.openFile}
+          onRefresh={() => void s.loadTree()}
+          onOpenFile={(p) => void s.openWorkspaceFile(p)}
+          onCloseFile={() => s.setOpenFile(null)}
+        />
+      )}
+      {tab === "terminal" && (
+        <TerminalPanel
+          cwd={s.workspace?.current?.path ?? null}
+          enabled={
+            !!s.workspace?.current &&
+            s.config?.terminal_enabled !== false &&
+            s.config?.access_mode !== "read_only"
+          }
+          history={s.termHistory}
+          pendingConfirm={s.pendingTerm}
+          onRun={(c) => void s.runTerminal(c)}
+          onConfirm={(ok) => void s.confirmTerminal(ok)}
+        />
+      )}
+      {tab === "git" && (
+        <GitPanel
+          project={s.workspace?.current ?? null}
+          status={s.gitStatus}
+          log={s.gitLog}
+          onRefresh={() => void s.loadGit()}
+        />
+      )}
+    </aside>
+  );
+}
 
 export default function App() {
   const s = useAxiom();
@@ -98,11 +150,22 @@ export default function App() {
               <line x1="9.5" y1="4" x2="9.5" y2="20" />
             </svg>
           </button>
-          <div className="topbar-title">{s.activeConversation?.title ?? "AXIOM"}</div>
+          <ProjectSelector
+            current={s.workspace?.current ?? null}
+            recent={s.workspace?.recent ?? []}
+            pinned={s.workspace?.pinned ?? []}
+            onOpen={s.openWorkspaceDialog}
+            onSwitch={(path) => void s.switchWorkspace(path)}
+            onClear={() => void s.clearWorkspace()}
+            onRemove={(path) => void s.removeWorkspace(path)}
+            onTogglePin={(path) => void s.toggleWorkspacePin(path)}
+          />
           <div className="topbar-spacer" />
+          <div className="access-dot" title={s.accessTitle}>{s.accessLabel}</div>
           <button
             className="icon-btn"
             title={theme === "light" ? "Тёмная тема" : "Светлая тема"}
+            aria-label={theme === "light" ? "Включить тёмную тему" : "Включить светлую тему"}
             onClick={() =>
               s.config && void s.saveConfig({ theme: theme === "light" ? "obsidian" : "light" })
             }
@@ -113,55 +176,74 @@ export default function App() {
               <Sun size={17} strokeWidth={1.8} />
             )}
           </button>
+          <button
+            className="icon-btn"
+            title={s.rightPanelOpen ? "Скрыть панель" : "Показать панель"}
+            aria-label={s.rightPanelOpen ? "Скрыть панель" : "Показать панель"}
+            aria-pressed={s.rightPanelOpen}
+            onClick={s.toggleRightPanel}
+          >
+            {s.rightPanelOpen ? (
+              <PanelRightClose size={17} strokeWidth={1.8} />
+            ) : (
+              <PanelRightOpen size={17} strokeWidth={1.8} />
+            )}
+          </button>
         </header>
 
-        <MessageList
-          messages={s.messages}
-          generating={s.generating}
-          statusText={s.statusText}
-          liveState={s.liveState}
-          elapsedMs={s.elapsedMs}
-          config={s.config}
-          modelName={s.activeModel}
-          modelCapabilities={s.activeModelInfo?.capabilities ?? []}
-          onEdit={s.editLastUser}
-          onOpen={s.openExternal}
-          onSuggestion={s.send}
-          onStop={s.cancel}
-        />
-
-        <Composer
-          generating={s.generating}
-          disabled={!s.connected}
-          draft={s.draft}
-          onDraftChange={s.setDraft}
-          onSend={s.send}
-          onCommand={s.runCommand}
-          onCancel={s.cancel}
-          webSearchEnabled={s.config?.web_search_enabled ?? true}
-          onToggleWebSearch={() =>
-            s.config && void s.saveConfig({ web_search_enabled: !s.config.web_search_enabled })
-          }
-          config={s.config}
-          modelName={s.activeModel}
-          modelSupportsVision={s.activeModelInfo?.capabilities.includes("vision") ?? null}
-          context={s.context}
-          onOpenContext={() => s.openOverlay("context")}
-          composerRef={s.composerRef}
-          modelSelector={
-            <ModelSelector
-              models={s.models}
-              active={s.activeModelInfo}
-              loading={s.modelsLoading}
-              error={s.modelsError}
-              switching={s.switchingModel}
-              disabled={!s.connected}
-              openSignal={s.modelMenuSignal}
-              onSelect={s.selectModel}
-              onRefresh={s.refreshModels}
+        <div className={"workbench" + (s.rightPanelOpen ? "" : " panel-closed")}>
+          <div className="workbench-chat">
+            <MessageList
+              messages={s.messages}
+              generating={s.generating}
+              statusText={s.statusText}
+              liveState={s.liveState}
+              elapsedMs={s.elapsedMs}
+              config={s.config}
+              modelName={s.activeModel}
+              modelCapabilities={s.activeModelInfo?.capabilities ?? []}
+              globalChat={!s.workspace?.current}
+              onEdit={s.editLastUser}
+              onOpen={s.openExternal}
+              onSuggestion={s.send}
+              onStop={s.cancel}
             />
-          }
-        />
+
+            <Composer
+              generating={s.generating}
+              disabled={!s.connected}
+              draft={s.draft}
+              onDraftChange={s.setDraft}
+              onSend={s.send}
+              onCommand={s.runCommand}
+              onCancel={s.cancel}
+              webSearchEnabled={s.config?.web_search_enabled ?? true}
+              onToggleWebSearch={() =>
+                s.config && void s.saveConfig({ web_search_enabled: !s.config.web_search_enabled })
+              }
+              config={s.config}
+              modelName={s.activeModel}
+              modelSupportsVision={s.activeModelInfo?.capabilities.includes("vision") ?? null}
+              context={s.context}
+              onOpenContext={() => s.openOverlay("context")}
+              composerRef={s.composerRef}
+              modelSelector={
+                <ModelSelector
+                  models={s.models}
+                  active={s.activeModelInfo}
+                  loading={s.modelsLoading}
+                  error={s.modelsError}
+                  switching={s.switchingModel}
+                  disabled={!s.connected}
+                  openSignal={s.modelMenuSignal}
+                  onSelect={s.selectModel}
+                  onRefresh={s.refreshModels}
+                />
+              }
+            />
+          </div>
+          <WorkbenchSide store={s} />
+        </div>
       </div>
 
       {s.settingsOpen && s.config && (

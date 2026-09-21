@@ -4,6 +4,58 @@ export type Role = "user" | "assistant" | "system" | "tool";
 
 export type Capability = "completion" | "tools" | "thinking" | "vision";
 
+export interface ProjectInfo {
+  path: string;
+  name: string;
+  kind: string;
+  git: boolean;
+  branch: string | null;
+  entries: string[];
+  /** Whether this project is pinned */
+  pinned?: boolean;
+}
+
+export interface ProjectManagerData {
+  current: ProjectInfo | null;
+  recent: ProjectInfo[];
+  pinned: ProjectInfo[];
+}
+
+export interface CreateProjectOptions {
+  path: string;
+  name?: string;
+  template?: string; // e.g., "empty", "node", "python", etc.
+}
+
+export interface ProjectSearchResult {
+  matches: ProjectInfo[];
+  query: string;
+  total: number;
+}
+
+export interface WorkspaceState {
+  current: ProjectInfo | null;
+  recent: ProjectInfo[];
+  pinned: ProjectInfo[];
+}
+
+export interface TreeNode {
+  name: string;
+  dir: boolean;
+  path: string;
+  children?: TreeNode[];
+}
+
+export interface TerminalResult {
+  ok: boolean;
+  content?: string;
+  error?: string | null;
+  exit_code?: number | null;
+  cwd?: string | null;
+  permission: "granted" | "ask" | "blocked";
+  command?: string;
+}
+
 export interface ModelInfo {
   name: string;
   displayName: string;
@@ -44,6 +96,10 @@ export interface AxiomConfig {
   model: string | null;
   think: boolean | null;
   web_search_enabled: boolean;
+  workspace_tools_enabled: boolean;
+  workspace_root: string | null;
+  access_mode: "read_only" | "workspace" | "full";
+  terminal_enabled: boolean;
   search_max_sources: number;
   search_read_sources: number;
   search_timeout: number;

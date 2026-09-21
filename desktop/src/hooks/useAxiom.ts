@@ -29,15 +29,26 @@ import type {
   HealthReport,
   LiveMessage,
   ModelInfo,
+  ProjectInfo,
   SendResult,
   StartupReport,
   StatusReport,
+  TerminalResult,
   ToolInfo,
+  TreeNode,
+  WorkspaceState,
 } from "../types";
 
 export type Phase = "booting" | "ready" | "unavailable" | "nomodels" | "error";
 export type Overlay = "help" | "status" | "tools" | "context" | null;
-export type SettingsSection = "general" | "models" | "chat" | "tools" | "appearance" | "about";
+export type SettingsSection =
+  | "general"
+  | "models"
+  | "chat"
+  | "tools"
+  | "appearance"
+  | "shortcuts"
+  | "about";
 
 export interface BootStep {
   id: string;
@@ -122,22 +133,45 @@ export function resolveModel(models: ModelInfo[], needle: string): ModelInfo | n
 export function toolLabel(name: string): string {
   if (name === "web_search") return "Веб-поиск";
   if (name === "fetch_url") return "Чтение страницы";
+  if (name === "list_files") return "Просмотр папки";
+  if (name === "read_file") return "Чтение файла";
+  if (name === "write_file") return "Запись файла";
+  if (name === "edit_file") return "Редактирование";
+  if (name === "search_text") return "Поиск по коду";
+  if (name === "search_files") return "Поиск файлов";
+  if (name === "run_command") return "Терминал";
+  if (name === "inspect_project") return "Осмотр проекта";
+  if (name.startsWith("git_")) return "Git";
   return name;
 }
 
 /** What a tool is actually working on (query, URL, ...). */
 export function toolTarget(_name: string, args: Record<string, unknown>): string {
+  const pick = (...keys: string[]): string => {
+    for (const key of keys) {
+      const value = args?.[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+  };
   const query = args?.query;
   const url = args?.url;
   if (typeof query === "string" && query.trim()) return query.trim();
   if (typeof url === "string" && url.trim()) return url.trim();
-  return "";
+  return pick("command", "path", "pattern", "glob", "source", "destination");
 }
 
 function toolStatusText(name: string, args: Record<string, unknown>): string {
   const target = toolTarget(name, args);
   if (name === "web_search") return target ? `Ищет: «${target}»` : "Ищет в интернете…";
   if (name === "fetch_url") return target ? `Читает: ${target}` : "Читает страницу…";
+  if (name === "list_files") return target ? `Смотрит папку: ${target}` : "Смотрит файлы…";
+  if (name === "read_file") return target ? `Читает: ${target}` : "Читает файл…";
+  if (name === "write_file") return target ? `Пишет: ${target}` : "Пишет файл…";
+  if (name === "edit_file") return target ? `Правит: ${target}` : "Редактирует…";
+  if (name === "search_text" || name === "search_files") return target ? `Ищет: «${target}»` : "Ищет по проекту…";
+  if (name === "run_command") return target ? `Выполняет: ${target}` : "Выполняет команду…";
+  if (name.startsWith("git_")) return "Git…";
   return toolLabel(name);
 }
 
@@ -177,9 +211,27 @@ export function useAxiom() {
   // ----------------------------------------------------------------- config
   const [config, setConfig] = useState<AxiomConfig | null>(null);
 
+  // ------------------------------------------------------- project workspace
+  const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
+  const [tree, setTree] = useState<TreeNode[]>([]);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [openFile, setOpenFile] = useState<{ path: string; content: string } | null>(null);
+  const [termHistory, setTermHistory] = useState<{ command: string; result: TerminalResult }[]>([]);
+  const [pendingTerm, setPendingTerm] = useState<string | null>(null);
+  const [gitStatus, setGitStatus] = useState<{ ok: boolean; content: string; error: string | null } | null>(null);
+  const [gitLog, setGitLog] = useState<{ ok: boolean; content: string; error: string | null } | null>(null);
+
   // --------------------------------------------------------------------- ui
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(268);
+  // Right workbench panel (Files/Terminal/Git) — session UI state, not config.
+  const [rightPanelOpen, setRightPanelOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("axiom.rightPanel") !== "closed";
+    } catch {
+      return true;
+    }
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [overlay, setOverlay] = useState<Overlay>(null);
@@ -261,6 +313,85 @@ export function useAxiom() {
     }
   }, []);
 
+  async function loadWorkspace() {
+    try {
+      const state = await request<{ current: ProjectInfo | null }>("workspace_info");
+      setWorkspace((w) => ({
+        current: state.current,
+        recent: w?.recent ?? [],
+        pinned: w?.pinned ?? [],
+      }));
+      return state;
+    } catch (err) {
+      notify(errorText(err), "error");
+      return null;
+    }
+  }
+
+  async function loadProjectList() {
+    try {
+      const [recent, pinned] = await Promise.all([
+        request<{ recent: ProjectInfo[] }>("recent_workspaces"),
+        request<{ pinned: ProjectInfo[] }>("pinned_workspaces"),
+      ]);
+      setWorkspace((w) => ({
+        current: w?.current ?? null,
+        recent: recent.recent,
+        pinned: pinned.pinned,
+      }));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function toggleWorkspacePin(path: string) {
+    const isPinned = await request<{ pinned: boolean }>("is_pinned", { path });
+    const success = isPinned.pinned
+      ? await request<boolean>("unpin_workspace", { path })
+      : await request<boolean>("pin_workspace", { path });
+    if (success) {
+      // Update local state optimistically
+      setWorkspace((w) => ({
+        current: w?.current ?? null,
+        recent: w?.recent?.map((p) =>
+          p.path === path ? { ...p, pinned: !p.pinned } : p
+        ) ?? [],
+        pinned: w?.pinned?.map((p) =>
+          p.path === path ? { ...p, pinned: !p.pinned } : p
+        ) ?? [],
+      }));
+      // Refresh project list to ensure consistency
+      void loadProjectList();
+    }
+  }
+
+  async function loadTree() {
+    setTreeLoading(true);
+    try {
+      const data = await request<{ tree: TreeNode[] }>("workspace_tree", { depth: 3 });
+      setTree(data.tree ?? []);
+    } catch {
+      setTree([]);
+    } finally {
+      setTreeLoading(false);
+    }
+  }
+
+  async function loadGit() {
+    try {
+      const data = await request<{
+        project: ProjectInfo | null;
+        status: { ok: boolean; content: string; error: string | null } | null;
+        log: { ok: boolean; content: string; error: string | null } | null;
+      }>("git_panel");
+      setGitStatus(data.status);
+      setGitLog(data.log);
+    } catch {
+      setGitStatus(null);
+      setGitLog(null);
+    }
+  }
+
   async function runBoot() {
     setPhase("booting");
     setBootSteps(freshSteps());
@@ -331,7 +462,21 @@ export function useAxiom() {
       }
 
       setStep("workspace", "running");
-      setStep("workspace", "ok", "готово");
+      try {
+        const ws = await request<{ current: ProjectInfo | null }>("workspace_info");
+        setWorkspace((prev) => ({
+          current: ws.current,
+          recent: prev?.recent ?? [],
+          pinned: prev?.pinned ?? [],
+        }));
+        setStep("workspace", "ok", ws.current ? `${ws.current.name} · ${ws.current.kind}` : "без проекта");
+        void loadTree();
+        void loadGit();
+        // Load recent/pinned projects after boot completes to avoid blocking startup
+        void loadProjectList();
+      } catch {
+        setStep("workspace", "ok", "готово");
+      }
       setConnected(true);
       setCoreLost(false);
       setPhase("ready");
@@ -816,6 +961,18 @@ export function useAxiom() {
     if (config) void saveConfig({ sidebar_open: next });
   }
 
+  function toggleRightPanel() {
+    setRightPanelOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("axiom.rightPanel", next ? "open" : "closed");
+      } catch {
+        /* storage unavailable — session-only state */
+      }
+      return next;
+    });
+  }
+
   function commitSidebarWidth(width: number) {
     setSidebarWidth(width);
     if (config && config.sidebar_width !== width) void saveConfig({ sidebar_width: width });
@@ -917,6 +1074,9 @@ export function useAxiom() {
       case "/exit":
         await quitApp();
         return true;
+      case "/workspace":
+        await loadWorkspace();
+        return true;
       default:
         return false;
     }
@@ -1010,6 +1170,104 @@ export function useAxiom() {
       notify(errorText(err), "error");
     }
   }
+
+  async function switchWorkspace(path: string) {
+    try {
+      const info = await request<ProjectInfo>("set_workspace", { path });
+      setWorkspace((w) => ({ current: info, recent: w?.recent ?? [], pinned: w?.pinned ?? [] }));
+      setOpenFile(null);
+      setTermHistory([]);
+      setPendingTerm(null);
+      await Promise.all([loadWorkspace(), loadTree(), loadGit(), refreshChats(), loadProjectList()]);
+      await newChat();
+      notify(`Проект: ${info.name} (${info.kind})`, "ok");
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  async function openWorkspaceDialog() {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const picked = await invoke<string | null>("pick_folder");
+      if (picked) await switchWorkspace(picked);
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  /** Global Chat: drop the active project — no file/terminal tools, global history. */
+  async function clearWorkspace() {
+    try {
+      await request("clear_workspace");
+      setOpenFile(null);
+      setTermHistory([]);
+      setPendingTerm(null);
+      setTree([]);
+      setGitStatus(null);
+      setGitLog(null);
+      setConfig(await request<AxiomConfig>("get_config"));
+      await Promise.all([loadWorkspace(), refreshChats(), loadProjectList()]);
+      await newChat();
+      notify("Глобальный чат: проект не активен", "ok");
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  async function removeWorkspace(path: string) {
+    try {
+      await request("remove_workspace", { path });
+      await loadWorkspace();
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  async function openWorkspaceFile(path: string) {
+    try {
+      const data = await request<{ ok: boolean; content?: string; error?: string }>("workspace_file", { path });
+      if (!data.ok) {
+        notify(data.error ?? "Не удалось прочитать файл", "error");
+        return;
+      }
+      setOpenFile({ path, content: data.content ?? "" });
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  async function runTerminal(command: string, confirmed = false) {
+    try {
+      const result = await request<TerminalResult>("run_terminal", { command, confirmed });
+      if (result.permission === "ask" && !confirmed) {
+        setPendingTerm(command);
+        return;
+      }
+      setPendingTerm(null);
+      setTermHistory((h) => [...h.slice(-99), { command, result }]);
+      if (!result.ok && result.permission === "granted") {
+        notify(result.error ?? "Команда завершилась с ошибкой", "error");
+      }
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  async function confirmTerminal(allow: boolean) {
+    const cmd = pendingTerm;
+    setPendingTerm(null);
+    if (allow && cmd) await runTerminal(cmd, true);
+  }
+
+  const accessLabel =
+    config?.access_mode === "read_only" ? "R/O" : config?.access_mode === "full" ? "FULL" : "WS";
+  const accessTitle =
+    config?.access_mode === "read_only"
+      ? "AI: только чтение файлов, без изменений и терминала"
+      : config?.access_mode === "full"
+        ? "AI: полный доступ (осторожно)"
+        : "AI: разрешена работа внутри проекта";
 
   // ------------------------------------------------------------- derived state
   const activeModelInfo = useMemo(
@@ -1115,12 +1373,37 @@ export function useAxiom() {
     // config
     config,
     saveConfig,
+    // workspace
+    workspace,
+    tree,
+    treeLoading,
+    openFile,
+    setOpenFile,
+    loadWorkspace,
+    loadTree,
+    loadGit,
+    switchWorkspace,
+    clearWorkspace,
+    openWorkspaceDialog,
+    removeWorkspace,
+    toggleWorkspacePin,
+    openWorkspaceFile,
+    termHistory,
+    pendingTerm,
+    runTerminal,
+    confirmTerminal,
+    gitStatus,
+    gitLog,
+    accessLabel,
+    accessTitle,
     // ui
     sidebarOpen,
     toggleSidebar,
     sidebarWidth,
     setSidebarWidth,
     commitSidebarWidth,
+    rightPanelOpen,
+    toggleRightPanel,
     settingsOpen,
     setSettingsOpen,
     settingsSection,

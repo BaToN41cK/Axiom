@@ -9,6 +9,7 @@ changes — frontends render :class:`~axiom.core.events.ToolCallEvent` and
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from axiom.core.errors import AxiomError
 from axiom.core.tools.base import (
@@ -24,8 +25,19 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, tuple[ToolDefinition, ToolHandler]] = {}
+        #: Per-tool classifiers: (tool name, args) -> permission. Used for
+        #: tools whose danger depends on the arguments (e.g. shell commands).
+        #: A classifier registered for one tool never affects other tools.
+        self.classifier: dict[str, Callable[[str, dict], ToolPermission]] = {}
 
-    def register(self, definition: ToolDefinition, handler: ToolHandler) -> None:
+    def register(
+        self,
+        definition: ToolDefinition,
+        handler: ToolHandler,
+        permission_for: Callable[[str, dict], ToolPermission] | None = None,
+    ) -> None:
+        if permission_for is not None:
+            self.classifier[definition.name] = permission_for
         self._tools[definition.name] = (definition, handler)
 
     def unregister(self, name: str) -> None:
@@ -67,6 +79,17 @@ class ToolRegistry:
         definition, handler = entry
         if definition.permission is ToolPermission.NEVER:
             return ToolResult(name=name, ok=False, error=f"Tool '{name}' is disabled")
+        classifier = self.classifier.get(name)
+        if classifier is not None and classifier(name, arguments or {}) is ToolPermission.ASK:
+            return ToolResult(
+                name=name,
+                ok=False,
+                error=(
+                    "Permission required: this command was not pre-approved by the user. "
+                    "Do not retry it — tell the user which command you need and why."
+                ),
+                data={"permission": "ask"},
+            )
         try:
             result = await handler(**(arguments or {}))
         except AxiomError as exc:
