@@ -12,7 +12,7 @@ interface Props {
 
 /** The real boot sequence — every status is a probe that actually ran. */
 export default function BootScreen({ phase, steps, error, onRetry, onRestartCore, onOpenSettings }: Props) {
-  const failed = phase === "unavailable" || phase === "nomodels" || phase === "error";
+  const failed = phase === "unavailable" || phase === "error";
   const done = steps.filter((step) => step.state === "ok").length;
 
   return (
@@ -51,14 +51,6 @@ export default function BootScreen({ phase, steps, error, onRetry, onRestartCore
                 <li>Ollama не запущена — выполните <code>ollama serve</code></li>
                 <li>неверный адрес API в настройках</li>
                 <li>порт 11434 занят или соединение отклонено</li>
-              </ul>
-            )}
-            {phase === "nomodels" && (
-              <ul className="boot-error-causes">
-                <li>
-                  Установите модель: <code>ollama pull qwen3:8b</code>
-                </li>
-                <li>затем нажмите «Повторить»</li>
               </ul>
             )}
             <div className="boot-error-actions">

@@ -35,9 +35,10 @@ class FakeClient(OllamaClient):
         model: str,
         messages: list[dict[str, Any]],
         *,
-        think: bool | None = None,
+        think: bool | str | None = None,
         tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         self.chat_calls.append(
             {"model": model, "messages": messages, "think": think, "tools": tools, "options": options}

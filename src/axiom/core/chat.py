@@ -56,8 +56,9 @@ from axiom.core.tools.terminal import RUN_COMMAND_TOOL, TerminalTool, classify_c
 from axiom.core.tools.web_search import WebSearchTool
 from axiom.core.workspace import ProjectInfo, WorkspaceManager, detect_project
 
-#: How many previous messages are sent back to the model.
-CONTEXT_MESSAGES = 40
+#: How many previous messages are sent back to the model by default.
+#: Overridable (and runtime-changeable) via ``Config.context_messages``.
+CONTEXT_MESSAGES = 20
 
 #: Every tool that touches the workspace filesystem. Global Chat (no project)
 #: drops exactly these from the registry; :meth:`set_workspace` puts them back.
@@ -96,7 +97,9 @@ class ChatSession:
         provider: SearchProvider | None = None,
     ) -> None:
         self.config = config or Config.load()
-        self.client = client or OllamaClient(self.config.ollama_url)
+        self.client = client or OllamaClient(
+            self.config.ollama_url, keep_alive=self.config.keep_alive
+        )
         self.registry = registry or ModelRegistry(self.client)
         self.history_store = history_store if history_store is not None else HistoryStore(
             limit=self.config.history_limit if self.config.save_history else None
@@ -173,22 +176,32 @@ class ChatSession:
         return self.machine.state
 
     async def startup(self) -> StartupReport:
-        """Probe Ollama and discover models — every step is real."""
+        """Probe Ollama and discover models — every step is real.
+
+        Single deduplicated probe: one ``/api/version`` request (not two), the
+        model list straight from ``/api/tags``, and ``/api/ps``/``/api/show``
+        stay lazy (only callers that actually need them request them).
+        """
         try:
-            if not await self.client.is_available():
+            version: str | None = None
+            available = await self.client.is_available()
+            models: list[ModelInfo] = []
+            if available:
+                # One real probe: version + models, reusing one healthy check.
+                version = await self.client.version()
+                models = await self.registry.refresh()
+            if not available or not models:
                 return StartupReport(
-                    ollama_available=False,
-                    error="Ollama is not reachable.",
-                    hint=f"Start Ollama and make sure it listens on {self.client.base_url}",
-                )
-            version = await self.client.version()
-            models = await self.registry.refresh()
-            if not models:
-                return StartupReport(
-                    ollama_available=True,
+                    ollama_available=available,
                     version=version,
-                    error="No models are installed.",
-                    hint="Install one with: ollama pull qwen3:8b",
+                    # An empty model list is not an error: the project will also
+                    # talk to API providers, so the UI must never fail on it.
+                    error=None,
+                    hint=(
+                        f"Start Ollama and make sure it listens on {self.client.base_url}"
+                        if not available
+                        else None
+                    ),
                 )
             selected = self.registry.resolve(self.config.model)
             if selected is not None:
@@ -203,6 +216,19 @@ class ChatSession:
             )
         except AxiomError as exc:
             return StartupReport(ollama_available=False, error=str(exc), hint=exc.hint)
+
+    async def warmup_model(self, name: str | None = None) -> bool:
+        """Load the model into memory in the background (never blocks a turn).
+
+        Returns ``False`` (no exception) when Ollama is unreachable or the
+        warm-up is disabled in config. Safe to fire-and-forget from the GUI.
+        """
+        if not self.config.warmup_model:
+            return False
+        target = name or (self.active_model.name if self.active_model else None)
+        if not target:
+            return False
+        return await self.client.warmup(target)
 
     async def refresh_models(self) -> list[ModelInfo]:
         return await self.registry.refresh()
@@ -543,6 +569,47 @@ class ChatSession:
         ):
             yield event
 
+    async def continue_last(self, *, force_search: bool = False) -> AsyncIterator[ChatEvent]:
+        """Resume the last (interrupted) assistant answer in place.
+
+        The partial answer stays in history and the model is nudged to pick up
+        exactly where it stopped. The nudge itself is prefill-only: it is sent
+        to the model but never stored, so the conversation keeps its real shape
+        (one user turn -> one continued assistant turn). New text is appended
+        to the same assistant message — no duplicates.
+        """
+        if self.busy:
+            yield ErrorEvent(
+                message="A generation is already running.",
+                kind="busy",
+                hint="Stop it before continuing.",
+            )
+            return
+        last_assistant = next(
+            (m for m in reversed(self.conversation.messages) if m.role == "assistant" and m.content),
+            None,
+        )
+        if last_assistant is None:
+            yield ErrorEvent(
+                message="There is nothing to continue.",
+                kind="empty_history",
+                hint="Send a message first.",
+            )
+            yield Done(state=GenerationState.ERROR)
+            return
+
+        self.machine.reset()
+        queue: asyncio.Queue[ChatEvent | None] = asyncio.Queue()
+        self._task = asyncio.create_task(
+            self._produce_continue(last_assistant, queue, force_search=force_search)
+        )
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield event
+        self._task = None
+
     async def _run_turn(
         self,
         text: str,
@@ -616,9 +683,18 @@ class ChatSession:
     # --------------------------------------------------------------- internals
 
     def _context_messages(self) -> list[dict]:
-        """Convert stored messages into the Ollama request format."""
+        """Convert stored messages into the Ollama request format.
+
+        Old reasoning traces are stripped: they bloat the prompt (a low-resource
+        machine pays prompt-eval for every token) and anchored the model to its
+        previous thought processes. Only the real answers go back to the model.
+        """
+        try:
+            limit = max(4, min(int(self.config.context_messages), 200))
+        except (TypeError, ValueError):
+            limit = CONTEXT_MESSAGES
         history: list[dict] = []
-        for message in self.conversation.messages[-CONTEXT_MESSAGES:]:
+        for message in self.conversation.messages[-limit:]:
             if message.role in ("user", "assistant") and (message.content or message.images):
                 entry: dict[str, Any] = {"role": message.role, "content": message.content}
                 if message.images:
@@ -646,6 +722,8 @@ class ChatSession:
                 tokens_out=metrics.get("tokens_out"),
                 tokens_in=metrics.get("tokens_in"),
                 tokens_per_second=metrics.get("tokens_per_second"),
+                ttft_ms=metrics.get("ttft_ms"),
+                load_ms=metrics.get("load_ms"),
             )
         )
 
@@ -722,12 +800,101 @@ class ChatSession:
                     tokens_out=metrics.get("tokens_out"),
                     tokens_in=metrics.get("tokens_in"),
                     tokens_per_second=metrics.get("tokens_per_second"),
+                    ttft_ms=metrics.get("ttft_ms"),
+                    load_ms=metrics.get("load_ms"),
                 )
             )
             self._record_turn(text, content, thinking)
         except asyncio.CancelledError:
             self._final_status_to(queue, GenerationState.CANCELLED)
             self._record_turn(text, "".join(content_parts).strip(), "".join(thinking_parts).strip())
+            raise
+        except AxiomError as exc:
+            queue.put_nowait(ErrorEvent(message=str(exc), kind=exc.kind, hint=exc.hint))
+            self._final_status_to(queue, GenerationState.ERROR)
+        except Exception as exc:
+            queue.put_nowait(
+                ErrorEvent(
+                    message=f"{type(exc).__name__}: {exc}",
+                    kind="internal",
+                    hint="This is an internal error. The session is still usable.",
+                )
+            )
+            self._final_status_to(queue, GenerationState.ERROR)
+        finally:
+            queue.put_nowait(None)
+
+    async def _produce_continue(
+        self,
+        partial: Message,
+        queue: asyncio.Queue[ChatEvent | None],
+        *,
+        force_search: bool,
+    ) -> None:
+        """Continue *partial* in place; fresh text joins the same message."""
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        try:
+            model = self.active_model
+            if model is None:  # guarded by continue_last(), kept for safety
+                queue.put_nowait(ErrorEvent(message="No model is available.", kind="model_not_found"))
+                self._final_status_to(queue, GenerationState.ERROR)
+                return
+            # Prefill nudge: visible to the model, never stored in history.
+            context = self._context_messages()
+            context.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Продолжи свой предыдущий ответ ровно с того места, где он оборвался. "
+                        "Не повторяй уже написанное, без вступлений — только продолжение."
+                    ),
+                }
+            )
+            async for event in self.agent.run(
+                context, model, force_search=force_search, search_query=None
+            ):
+                if isinstance(event, ContentChunk):
+                    content_parts.append(event.text)
+                elif isinstance(event, ReasoningChunk):
+                    thinking_parts.append(event.text)
+                queue.put_nowait(event)
+
+            metrics = dict(self.agent.metrics)
+            self.last_metrics = metrics
+            content = "".join(content_parts).strip()
+            thinking = "".join(thinking_parts).strip()
+            if not content:
+                queue.put_nowait(self._empty_answer_event(thinking))
+                self._final_status_to(queue, GenerationState.ERROR)
+                return
+            status = self._final_status(GenerationState.COMPLETED)
+            if status:
+                queue.put_nowait(status)
+            queue.put_nowait(
+                Done(
+                    state=GenerationState.COMPLETED,
+                    duration_ms=metrics.get("duration_ms", 0),
+                    tokens_out=metrics.get("tokens_out"),
+                    tokens_in=metrics.get("tokens_in"),
+                    tokens_per_second=metrics.get("tokens_per_second"),
+                    ttft_ms=metrics.get("ttft_ms"),
+                    load_ms=metrics.get("load_ms"),
+                )
+            )
+            # Append in place: partial answer + continuation are one turn.
+            partial.content = f"{partial.content.rstrip()}\n\n{content}"
+            if thinking:
+                partial.thinking = (
+                    f"{partial.thinking}\n\n{thinking}" if partial.thinking else thinking
+                )
+            self._save_conversation()
+        except asyncio.CancelledError:
+            # A second cancel mid-continuation still keeps what arrived.
+            if content_parts:
+                partial.content = f"{partial.content.rstrip()}\n\n{''.join(content_parts).strip()}"
+            self._final_status_to(queue, GenerationState.CANCELLED)
+            self._save_conversation()
             raise
         except AxiomError as exc:
             queue.put_nowait(ErrorEvent(message=str(exc), kind=exc.kind, hint=exc.hint))

@@ -126,9 +126,7 @@ export default function Sidebar(props: Props) {
         <div className="sidebar-inner">
           <div className="side-head">
             <span className="side-brand">AXIOM</span>
-            <button className="icon-btn tiny" onClick={onClose} title="Скрыть панель (Ctrl+B)">
-              <X size={14} strokeWidth={1.9} />
-            </button>
+            
           </div>
 
           <button className="new-chat" onClick={onNewChat} title="Новый чат (Ctrl+N)">

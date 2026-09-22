@@ -75,7 +75,6 @@ export default function SettingsModal({
     const patch: Partial<AxiomConfig> = {
       ollama_url: draft.ollama_url,
       model: draft.model,
-      think: draft.think,
       web_search_enabled: draft.web_search_enabled,
       workspace_tools_enabled: draft.workspace_tools_enabled,
       workspace_root: draft.workspace_root,
@@ -92,6 +91,13 @@ export default function SettingsModal({
       save_history: draft.save_history,
       temperature: draft.temperature === null ? null : Number(draft.temperature),
       system_prompt: draft.system_prompt,
+      think: draft.think,
+      thinking_mode: draft.thinking_mode,
+      keep_alive: draft.keep_alive,
+      warmup_model: draft.warmup_model,
+      num_ctx: draft.num_ctx === null ? null : Number(draft.num_ctx),
+      num_predict: draft.num_predict === null ? null : Number(draft.num_predict),
+      context_messages: Number(draft.context_messages),
       density: draft.density,
       font_size: Number(draft.font_size),
       sidebar_open: draft.sidebar_open,
@@ -238,17 +244,76 @@ function ModelsSection({ draft, set, config, onRestartCore }: SectionProps & { c
           onChange={(e) => set("ollama_url", e.target.value)}
         />
       </Row>
-      <Row label="Think-режим" hint="null — как решит модель (reasoning, если поддерживается)">
+      <Row label="Think-режим" hint="Уровень рассуждений: авто — решает ядро по запросу">
         <select
-          value={draft.think === null ? "auto" : draft.think ? "on" : "off"}
-          onChange={(e) =>
-            set("think", e.target.value === "auto" ? null : e.target.value === "on")
+          value={
+            draft.think === null || draft.think === false
+              ? "auto"
+              : draft.think === true
+                ? "on"
+                : draft.think
           }
+          onChange={(e) => {
+            const v = e.target.value;
+            set(
+              "think",
+              v === "auto" ? null : v === "on" ? true : (v as "low" | "medium" | "high" | "max"),
+            );
+          }}
         >
           <option value="auto">Авто</option>
           <option value="on">Всегда</option>
-          <option value="off">Выключено</option>
+          <option value="low">Низкий</option>
+          <option value="medium">Средний</option>
+          <option value="high">Высокий</option>
+          <option value="max">Максимум</option>
         </select>
+      </Row>
+      <Row label="Режим мышления" hint="Пресет глубины reasoning, когда Think = Авто">
+        <select
+          value={draft.thinking_mode}
+          onChange={(e) =>
+            set("thinking_mode", e.target.value as AxiomConfig["thinking_mode"])
+          }
+        >
+          <option value="auto">Авто (по запросу)</option>
+          <option value="fast">Быстрый</option>
+          <option value="normal">Обычный</option>
+          <option value="deep">Глубокий</option>
+        </select>
+      </Row>
+      <Row label="Прогрев модели" hint="Загрузить модель в память сразу после старта">
+        <Toggle value={draft.warmup_model} onChange={(v) => set("warmup_model", v)} />
+      </Row>
+      <Row label="Держать модель в памяти" hint='Ollama keep_alive, например "30m" или "1h"'>
+        <input
+          value={draft.keep_alive}
+          spellCheck={false}
+          onChange={(e) => set("keep_alive", e.target.value)}
+        />
+      </Row>
+      <Row label="Контекстное окно" hint="Пусто — по умолчанию модели (num_ctx)">
+        <input
+          type="number"
+          min={512}
+          max={131072}
+          step={512}
+          value={draft.num_ctx ?? ""}
+          placeholder="auto"
+          onChange={(e) => set("num_ctx", e.target.value === "" ? null : Number(e.target.value))}
+        />
+      </Row>
+      <Row label="Максимум ответа" hint="Лимит токенов генерации (num_predict), пусто — авто">
+        <input
+          type="number"
+          min={16}
+          max={131072}
+          value={draft.num_predict ?? ""}
+          placeholder="auto"
+          onChange={(e) =>
+            set("num_predict", e.target.value === "" ? null : Number(e.target.value))
+          }
+        />
       </Row>
       <Row label="Ядро AXIOM" hint="Перезапуск Python-ядра и повторная проверка Ollama">
         <button className="btn ghost" onClick={onRestartCore}>
@@ -279,6 +344,15 @@ function ChatSection({ draft, set }: SectionProps) {
       </Row>
       <Row label="Индикатор контекста" hint="Заполнение контекстного окна модели">
         <Toggle value={draft.show_context} onChange={(v) => set("show_context", v)} />
+      </Row>
+      <Row label="Сообщений в контексте" hint="Сколько последних сообщений отправлять модели">
+        <input
+          type="number"
+          min={4}
+          max={200}
+          value={draft.context_messages}
+          onChange={(e) => set("context_messages", Number(e.target.value))}
+        />
       </Row>
     </>
   );

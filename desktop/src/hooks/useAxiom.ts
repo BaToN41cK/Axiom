@@ -39,7 +39,7 @@ import type {
   WorkspaceState,
 } from "../types";
 
-export type Phase = "booting" | "ready" | "unavailable" | "nomodels" | "error";
+export type Phase = "booting" | "ready" | "unavailable" | "error";
 export type Overlay = "help" | "status" | "tools" | "context" | null;
 export type SettingsSection =
   | "general"
@@ -443,32 +443,49 @@ export function useAxiom() {
       // The model list and the saved history are independent as well.
       setStep("models", "running");
       current = "models";
-      const [list] = await Promise.all([request<ModelInfo[]>("models"), refreshChats()]);
-      setModels(list);
-      setStep("models", "ok", list.length ? `${list.length} модел${list.length === 1 ? "ь" : "и"}` : "ничего не найдено");
-      if (list.length === 0) {
-        setStep("select", "failed", null);
-        setConnected(true);
-        setBootError({
-          message: "Модели не установлены",
-          hint: "Установите модель в Ollama:  ollama pull qwen3:8b",
-          url: probe.url,
-        });
-        setPhase("nomodels");
-        return;
+      // /api/tags can briefly answer with an empty list (or fail) while Ollama
+      // is still starting / loading a model — retry before believing it.
+      const chatsLoaded = refreshChats();
+      let list: ModelInfo[] = [];
+      let lastModelsError: string | null = null;
+      for (let attempt = 0; attempt < 3 && list.length === 0; attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 700));
+        try {
+          list = await request<ModelInfo[]>("models");
+          lastModelsError = null;
+        } catch (err) {
+          lastModelsError = errorText(err);
+        }
       }
+      await chatsLoaded;
+      setModels(list);
+      setStep(
+        "models",
+        "ok",
+        list.length
+          ? `${list.length} модел${list.length === 1 ? "ь" : "и"}`
+          : lastModelsError
+            ? "нет данных — повторим позже"
+            : "моделей пока нет",
+      );
 
-      setStep("select", "running");
-      current = "select";
-      const preferred = cfg.model ? list.find((m) => m.name === cfg.model) : null;
-      const chosen = preferred ?? list[0];
-      const selected = await request<ModelInfo>("set_model", { name: chosen.name });
-      setActiveModel(selected.name);
-      setModels((known) => known.map((m) => (m.name === selected.name ? { ...m, ...selected } : m)));
-      void loadModelDetail(selected.name);
-      setStep("select", "ok", selected.displayName);
-      if (cfg.model && !preferred) {
-        notify(`Модель ${cfg.model} не найдена в Ollama — выбрана ${selected.displayName}`, "error");
+      if (list.length === 0) {
+        // An empty model list is NOT an error (API providers are coming):
+        // boot continues to the main screen and the list is re-probed later.
+        setStep("select", "ok", "модель не выбрана");
+      } else {
+        setStep("select", "running");
+        current = "select";
+        const preferred = cfg.model ? list.find((m) => m.name === cfg.model) : null;
+        const chosen = preferred ?? list[0];
+        const selected = await request<ModelInfo>("set_model", { name: chosen.name });
+        setActiveModel(selected.name);
+        setModels((known) => known.map((m) => (m.name === selected.name ? { ...m, ...selected } : m)));
+        void loadModelDetail(selected.name);
+        setStep("select", "ok", selected.displayName);
+        if (cfg.model && !preferred) {
+          notify(`Модель ${cfg.model} не найдена в Ollama — выбрана ${selected.displayName}`, "error");
+        }
       }
 
       setStep("workspace", "running");
@@ -490,6 +507,21 @@ export function useAxiom() {
       setConnected(true);
       setCoreLost(false);
       setPhase("ready");
+      // Background model warm-up: fire-and-forget, never blocks the GUI.
+      void request<{ warmed: boolean; pending: boolean }>("warmup", {}).catch(() => {});
+      if (list.length === 0) {
+        // The list often appears seconds later (Ollama still loading a model):
+        // re-probe quietly in the background and select a model if it showed up.
+        window.setTimeout(() => {
+          void refreshModels()
+            .then((fresh) => {
+              if (fresh.length === 0) return;
+              const preferred = cfg.model ? fresh.find((m) => m.name === cfg.model) : null;
+              void selectModel((preferred ?? fresh[0]).name, true);
+            })
+            .catch(() => {});
+        }, 3000);
+      }
     } catch (err) {
       setStep(current, "failed", errorText(err));
       setBootError({ message: errorText(err), hint: null, url: health?.url ?? "" });
@@ -718,12 +750,32 @@ export function useAxiom() {
   }
 
   async function continueGeneration() {
-    const last = [...messages].reverse().find((m) => m.role === "assistant" && m.content);
-    if (!last) {
+    if (generatingRef.current) {
+      notify("Генерация уже идёт — остановите её (Esc)", "error");
+      return;
+    }
+    if (!connected) {
+      notify("Ollama недоступна — проверьте подключение", "error");
+      return;
+    }
+    const hasPartial = messages.some((m) => m.role === "assistant" && m.content);
+    if (!hasPartial) {
       notify("Продолжать нечего — в этом чате ещё нет ответа", "error");
       return;
     }
-    await send("Продолжи свой предыдущий ответ с того места, где он оборвался. Не повторяй уже написанное.");
+    // Resume in place: the backend nudges the model with the partial answer
+    // (prefill-only) and new text is appended to the same assistant message.
+    await streamTurn("continue_last", { forceSearch: false }, () => {
+      setMessages((list) => {
+        const target = [...list].reverse().find((m) => m.role === "assistant" && m.content);
+        if (!target) return [...list, liveAssistant()];
+        return list.map((m) =>
+          m.id === target.id
+            ? { ...m, streaming: true, metrics: undefined, error: undefined }
+            : m,
+        );
+      });
+    });
   }
 
   async function editLastUser(text: string, forceSearch = false) {
@@ -864,9 +916,8 @@ export function useAxiom() {
     try {
       const list = await request<ModelInfo[]>("models");
       setModels(list);
-      if (list.length === 0) {
-        setModelsError("Ollama не сообщает ни об одной установленной модели");
-      }
+      // An empty list is a normal state (API providers are coming) — never an
+      // error banner; real transport failures still land in the catch below.
       // A model can disappear from Ollama while AXIOM is running: adapt for real.
       if (activeModel && !list.some((m) => m.name === activeModel)) {
         const fallback = list[0];
@@ -928,21 +979,31 @@ export function useAxiom() {
       setStep("detect", "ok", url ?? health?.url ?? "");
       setStep("connect", "ok", report.version ? `Ollama ${report.version}` : "соединение установлено");
       setModels(report.models);
-      setStep("models", "ok", `${report.models.length} модел${report.models.length === 1 ? "ь" : "и"}`);
+      setStep(
+        "models",
+        "ok",
+        report.models.length
+          ? `${report.models.length} модел${report.models.length === 1 ? "ь" : "и"}`
+          : "моделей пока нет",
+      );
       if (report.selected) {
         setActiveModel(report.selected.name);
         void loadModelDetail(report.selected.name);
         setStep("select", "ok", report.selected.displayName);
       } else {
-        setStep("select", "failed");
+        // No selected model is not a failure — the list may fill in later.
+        setStep("select", "ok", "модель не выбрана");
       }
       setConfig(await request<AxiomConfig>("get_config"));
       await refreshChats();
       setStep("workspace", "ok", "готово");
-      setConnected(!!report.selected);
+      setConnected(true);
       setCoreLost(false);
-      setPhase(report.selected ? "ready" : "nomodels");
-      notify(report.selected ? "Ollama подключена" : "Ollama подключена, но моделей нет", report.selected ? "ok" : "error");
+      setPhase("ready");
+      notify(
+        report.selected ? "Ollama подключена" : "Ollama подключена — список моделей пока пуст",
+        report.selected ? "ok" : "info",
+      );
     } catch (err) {
       setStep("detect", "failed", errorText(err));
       setConnected(false);

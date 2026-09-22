@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 from axiom.core.chat import ChatSession
 from axiom.core.config import Config
 from axiom.core.events import ContentChunk, Done, ErrorEvent, ReasoningChunk
-from axiom.core.history import HistoryStore
+from axiom.core.history import HistoryStore, Message
 from axiom.core.models import ModelInfo
 from axiom.core.ollama import OllamaClient, StreamChunk
 from axiom.core.state import GenerationState
@@ -45,9 +46,10 @@ class FakeClient(OllamaClient):
         model: str,
         messages: list[dict[str, Any]],
         *,
-        think: bool | None = None,
+        think: bool | str | None = None,
         tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         self.chat_calls.append(
             {
@@ -56,6 +58,7 @@ class FakeClient(OllamaClient):
                 "think": think,
                 "tools": tools,
                 "options": options,
+                "keep_alive": keep_alive,
             }
         )
         if self._block is not None:
@@ -175,3 +178,52 @@ async def test_conversation_persisted_between_sends(tmp_path: Path):
     assert len(saved) == 1
     assert saved[0].messages[0].content == "question one"
     assert saved[0].messages[-1].content == "answer one"
+
+
+# ---------------------------------------------------------------- continue_last
+
+
+async def test_continue_last_appends_to_same_assistant_message(tmp_path: Path):
+    session = make_session(
+        tmp_path, [StreamChunk(content="continuation text"), StreamChunk(done=True)]
+    )
+    # Simulate an interrupted turn: user question + partial answer on record.
+    session.conversation.messages.append(
+        Message(role="user", content="write a long essay", created_at=time.time())
+    )
+    partial = Message(role="assistant", content="partial answer...", created_at=time.time())
+    session.conversation.messages.append(partial)
+
+    events = [event async for event in session.continue_last()]
+    done = [e for e in events if isinstance(e, Done)]
+    assert done and done[0].state is GenerationState.COMPLETED
+    # The nudge never entered the stored history: still exactly 2 messages.
+    assert len(session.conversation.messages) == 2
+    # Fresh text was appended to the same Message object (one continued turn).
+    assert partial.content == "partial answer...\n\ncontinuation text"
+    assert session.conversation.messages[-1] is partial
+    # The model actually saw the partial answer plus the prefill nudge.
+    fake = session.client
+    sent = fake.chat_calls[-1]["messages"]
+    assert sent[-2]["content"] == "partial answer..."
+    assert "Продолжи" in sent[-1]["content"]
+    assert sent[-1]["role"] == "user"
+
+
+async def test_continue_last_with_nothing_to_continue(tmp_path: Path):
+    session = make_session(tmp_path, [StreamChunk(content="x"), StreamChunk(done=True)])
+    events = [event async for event in session.continue_last()]
+    assert any(isinstance(e, ErrorEvent) and e.kind == "empty_history" for e in events)
+    done = [e for e in events if isinstance(e, Done)]
+    assert done and done[0].state is GenerationState.ERROR
+
+
+async def test_continue_last_rejects_while_busy(tmp_path: Path):
+    block = asyncio.Event()
+    session = make_session(tmp_path, [StreamChunk(content="x")], block=block)
+    first = asyncio.create_task(collect(session, "first"))
+    await asyncio.sleep(0.05)
+    events = [event async for event in session.continue_last()]
+    assert any(isinstance(e, ErrorEvent) and e.kind == "busy" for e in events)
+    block.set()
+    await first

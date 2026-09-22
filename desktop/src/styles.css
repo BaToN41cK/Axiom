@@ -488,6 +488,8 @@ body.resizing .workbench-side { transition: none; }
 
 .icon-btn:hover { background: var(--bg-hover); color: var(--text); }
 .icon-btn:focus-visible { outline: 1px solid var(--accent-hover); outline-offset: 1px; }
+/* Panel toggle pressed state: the open panel lights its button. */
+.icon-btn[aria-pressed="true"] { background: var(--bg-hover); color: var(--accent); }
 
 .topbar-title {
   font-size: 13.5px;
@@ -758,8 +760,91 @@ body.resizing .workbench-side { transition: none; }
   margin: 12px 0;
 }
 .markdown pre code { background: none; border: none; padding: 0; }
-.markdown a { color: var(--accent); text-decoration: none; }
-.markdown a:hover { text-decoration: underline; }
+.markdown a.md-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  text-underline-offset: 3px;
+  position: relative;
+}
+.markdown a.md-link:hover {
+  text-decoration-style: solid;
+  text-decoration-color: var(--accent);
+}
+
+/* Hover preview card for links in the answer. */
+.link-card {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 240px;
+  max-width: 380px;
+  padding: 9px 11px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  animation: fade-slide 0.16s ease both;
+}
+.link-card-body { flex: 1; min-width: 0; }
+.link-card-title {
+  display: block;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-card-url {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.link-card-url b { color: var(--text-dim); font-weight: 500; }
+.link-card-icon { flex: none; color: var(--text-faint); }
+
+/* Collapsible <details> sections written by the model. */
+.markdown details.md-details {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 13px;
+  margin: 12px 0;
+}
+.markdown details.md-details > *:last-child { margin-bottom: 0; }
+.markdown summary.md-summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: var(--text-dim);
+  user-select: none;
+  list-style: none;
+}
+.markdown summary.md-summary::-webkit-details-marker { display: none; }
+.markdown summary.md-summary::before {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--text-faint);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  margin-right: 7px;
+  vertical-align: middle;
+  transform-origin: 2px center;
+  transition: transform 0.15s ease;
+}
+.markdown details[open] > summary.md-summary::before { transform: rotate(90deg); }
+.markdown summary.md-summary:hover { color: var(--text); }
 .markdown blockquote {
   border-left: 3px solid var(--border);
   margin: 10px 0;
@@ -1030,24 +1115,101 @@ body.resizing .workbench-side { transition: none; }
 .sources .chevron { transition: transform 0.18s; }
 .sources .chevron.open { transform: rotate(180deg); }
 
-.sources-list { margin: 8px 0 0; padding: 0 4px; list-style: none; }
-
-.sources-list li a {
+.sources-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
   gap: 8px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  font-size: 12.5px;
-  color: var(--text-dim);
-  text-decoration: none;
-  transition: background 0.12s;
 }
 
-.sources-list li a:hover { background: var(--bg-hover); color: var(--text); }
-.source-index { color: var(--accent); font-family: var(--mono); font-size: 11px; }
-.source-title { color: var(--text); white-space: nowrap; }
-.source-url { color: var(--text-faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+.source-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--bg-hover);
+}
+
+.source-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.source-index {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 1px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  border-radius: 50%;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  display: grid;
+  place-items: center;
+}
+
+.favicon { flex: none; border-radius: 3px; display: block; }
+.favicon-fallback {
+  flex: none;
+  display: grid;
+  place-items: center;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: 4px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.source-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-open { flex: none; color: var(--text-faint); transition: color 0.14s; }
+.source-card:hover .source-open { color: var(--accent); }
+
+.source-url {
+  display: block;
+  margin: 4px 0 0 26px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-url b { color: var(--text-dim); font-weight: 500; }
+
+.source-divider {
+  display: block;
+  height: 1px;
+  background: var(--border-soft);
+  margin: 8px 0 7px;
+}
+.source-snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
 
 .msg-error {
   display: flex;
@@ -1077,7 +1239,7 @@ body.resizing .workbench-side { transition: none; }
 
 
 /* ----------------------------------------------------------- composer */
-.composer-area { padding: 0 24px 14px; }
+.composer-area { position: relative; padding: 0 24px 14px; }
 
 .composer {
   max-width: 780px;
@@ -1817,6 +1979,27 @@ body.resizing .workbench-side { transition: none; }
 
 .msg-note svg { color: var(--text-faint); flex: none; }
 
+/* Resume button inside a cancelled answer (continue generation in place). */
+.resume-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--accent, var(--text));
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.resume-btn svg { color: currentColor; flex: none; }
+
+.resume-btn:hover:not(:disabled) { text-decoration: underline; }
+
+.resume-btn:disabled { opacity: 0.5; cursor: default; }
+
 /* -------------------------------------------------- button size variants */
 .btn.small { padding: 5px 11px; font-size: 12px; }
 .btn.tiny { padding: 3px 8px; font-size: 11.5px; }
@@ -1959,27 +2142,6 @@ body.resizing .workbench-side { transition: none; }
   font-size: 11.5px;
   color: var(--bad);
   word-break: break-word;
-}
-
-/* -------------------------------------------------- clickable sources */
-.source-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  width: 100%;
-  text-align: left;
-  padding: 7px 9px;
-  border-radius: var(--radius-sm);
-  transition: background 0.14s ease;
-}
-
-.source-row:hover { background: var(--bg-hover); }
-
-.source-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
 }
 
 /* -------------------------------------------------- overlay panels */

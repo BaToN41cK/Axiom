@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Moon, PanelRightClose, PanelRightOpen, Sun } from "lucide-react";
+import { Moon, PanelLeft, PanelRight, Sun } from "lucide-react";
 import BootScreen from "./components/BootScreen";
 import ProjectSelector from "./components/ProjectSelector";
 import OverlayPanel from "./components/OverlayPanel";
@@ -176,13 +176,12 @@ export default function App() {
         <header className="topbar">
           <button
             className="icon-btn"
-            title="Sidebar (Ctrl+B)"
+            title="Панель показать, скрыть L (Ctrl+B)"
+            aria-label="Панель показать, скрыть L"
+            aria-pressed={s.sidebarOpen}
             onClick={() => s.toggleSidebar()}
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <rect x="3" y="4" width="18" height="16" rx="2.5" />
-              <line x1="9.5" y1="4" x2="9.5" y2="20" />
-            </svg>
+            <PanelLeft size={17} strokeWidth={1.8} />
           </button>
           <ProjectSelector
             current={s.workspace?.current ?? null}
@@ -212,16 +211,12 @@ export default function App() {
           </button>
           <button
             className="icon-btn"
-            title={s.rightPanelOpen ? "Скрыть панель" : "Показать панель"}
-            aria-label={s.rightPanelOpen ? "Скрыть панель" : "Показать панель"}
+            title="Панель показать, скрыть R"
+            aria-label="Панель показать, скрыть R"
             aria-pressed={s.rightPanelOpen}
             onClick={s.toggleRightPanel}
           >
-            {s.rightPanelOpen ? (
-              <PanelRightClose size={17} strokeWidth={1.8} />
-            ) : (
-              <PanelRightOpen size={17} strokeWidth={1.8} />
-            )}
+            <PanelRight size={17} strokeWidth={1.8} />
           </button>
         </header>
 
@@ -241,6 +236,7 @@ export default function App() {
               onOpen={s.openExternal}
               onSuggestion={s.send}
               onStop={s.cancel}
+              onContinue={s.continueGeneration}
             />
 
             <Composer

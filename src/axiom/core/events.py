@@ -108,6 +108,10 @@ class Done(BaseModel):
     tokens_out: int | None = None
     tokens_in: int | None = None
     tokens_per_second: float | None = None
+    #: Real time to the first streamed token (measured by the agent).
+    ttft_ms: int | None = None
+    #: Real model load time reported by Ollama for this generation (ms).
+    load_ms: int | None = None
 
 
 ChatEvent = (

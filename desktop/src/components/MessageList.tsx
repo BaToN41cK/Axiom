@@ -2,16 +2,20 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import {
   ChevronDown,
   Cpu,
+  ExternalLink,
   Globe,
   Pencil,
+  Play,
   Sparkles,
   Square,
 } from "lucide-react";
 import type { AxiomConfig, LiveMessage } from "../types";
-import { MessageError, SourcesList, ToolActivityList } from "./ToolBits";
+import { Favicon, MessageError, SourcesList, ToolActivityList, hostOf, pathOf } from "./ToolBits";
 import CodeBlock, { CopyIconButton } from "./CodeBlock";
 import { formatElapsed } from "../lib/format";
 
@@ -30,6 +34,7 @@ interface Props {
   onOpen: (url: string) => void;
   onSuggestion: (text: string, forceSearch?: boolean) => void;
   onStop: () => void;
+  onContinue: () => void;
 }
 
 const SUGGESTIONS: { text: string; search?: boolean }[] = [
@@ -44,6 +49,8 @@ function liveStateLabel(state: string): string {
   switch (state) {
     case "connecting":
       return "Подключение";
+    case "loading":
+      return "Загружает модель";
     case "thinking":
       return "Размышляет";
     case "tool_call":
@@ -56,6 +63,8 @@ function liveStateLabel(state: string): string {
       return "Остановлено";
     case "error":
       return "Ошибка";
+    case "ready":
+      return "Готов";
     default:
       return "Генерация";
   }
@@ -76,6 +85,7 @@ export default function MessageList(props: Props) {
     onOpen,
     onSuggestion,
     onStop,
+    onContinue,
   } = props;
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -167,6 +177,7 @@ export default function MessageList(props: Props) {
               elapsedMs={elapsedMs}
               onOpen={onOpen}
               onStop={onStop}
+              onContinue={onContinue}
             />
           ),
         )}
@@ -296,6 +307,7 @@ function AssistantMessage({
   elapsedMs,
   onOpen,
   onStop,
+  onContinue,
 }: {
   message: LiveMessage;
   config: AxiomConfig | null;
@@ -305,6 +317,7 @@ function AssistantMessage({
   elapsedMs: number;
   onOpen: (url: string) => void;
   onStop: () => void;
+  onContinue: () => void;
 }) {
   const streaming = message.streaming;
   const cancelled = message.metrics?.state === "cancelled";
@@ -356,20 +369,16 @@ function AssistantMessage({
           <div className="markdown">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeRaw, rehypeSanitize]}
               components={{
                 code: MarkdownCode,
                 a: ({ href, children }) => (
-                  <a
-                    href={href}
-                    title={href}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      if (href) onOpen(href);
-                    }}
-                  >
+                  <MarkdownLink href={href} onOpen={onOpen}>
                     {children}
-                  </a>
+                  </MarkdownLink>
                 ),
+                details: ({ children }) => <details className="md-details">{children}</details>,
+                summary: ({ children }) => <summary className="md-summary">{children}</summary>,
                 table: ({ children }) => (
                   <div className="table-wrap">
                     <table>{children}</table>
@@ -388,10 +397,24 @@ function AssistantMessage({
           </div>
         ))}
 
-      {!streaming && cancelled && !message.content && (
-        <div className="msg-note">
-          <Square size={12} strokeWidth={2} />
-          <span>Генерация остановлена</span>
+      {!streaming && cancelled && (
+        <div className="msg-note cancelled-resume">
+          {message.content ? (
+            <button
+              className="resume-btn"
+              onClick={onContinue}
+              disabled={generating}
+              title="Продолжить генерацию с места остановки"
+            >
+              <Play size={12} strokeWidth={2} fill="currentColor" />
+              <span>Продолжить генерацию</span>
+            </button>
+          ) : (
+            <>
+              <Square size={12} strokeWidth={2} />
+              <span>Генерация остановлена</span>
+            </>
+          )}
         </div>
       )}
 
@@ -403,6 +426,12 @@ function AssistantMessage({
           {message.metrics.tokensIn != null && <span>{message.metrics.tokensIn} tok in</span>}
           {message.metrics.tokensPerSecond != null && (
             <span>{message.metrics.tokensPerSecond.toFixed(1)} tok/s</span>
+          )}
+          {message.metrics.ttftMs != null && (
+            <span>TTFT {(message.metrics.ttftMs / 1000).toFixed(1)}s</span>
+          )}
+          {message.metrics.loadMs != null && message.metrics.loadMs > 0 && (
+            <span>загрузка {(message.metrics.loadMs / 1000).toFixed(1)}s</span>
           )}
           {message.metrics.durationMs > 0 && <span>{formatElapsed(message.metrics.durationMs)}</span>}
         </div>
@@ -421,6 +450,75 @@ function MarkdownCode(props: { className?: string; children?: ReactNode }) {
     return <code className="md-inline">{children}</code>;
   }
   return <CodeBlock code={trimmed} language={language} />;
+}
+
+/** Pretty markdown link: dotted underline, hover preview card, click opens externally. */
+function MarkdownLink({
+  href,
+  children,
+  onOpen,
+}: {
+  href?: string;
+  children?: ReactNode;
+  onOpen: (url: string) => void;
+}) {
+  const [preview, setPreview] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  if (!href) return <>{children}</>;
+
+  const label =
+    typeof children === "string"
+      ? children
+      : Array.isArray(children)
+        ? children.filter((child): child is string => typeof child === "string").join("")
+        : "";
+  const host = hostOf(href);
+
+  const armShow = () => {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setPreview(true), 350);
+  };
+  const armHide = () => {
+    if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    setPreview(false);
+  };
+
+  return (
+    <a
+      className="md-link"
+      href={href}
+      title={href}
+      onMouseEnter={armShow}
+      onMouseLeave={armHide}
+      onClick={(event) => {
+        event.preventDefault();
+        armHide();
+        onOpen(href);
+      }}
+    >
+      {children}
+      {preview && host && (
+        <span className="link-card">
+          <Favicon url={href} size={16} />
+          <span className="link-card-body">
+            <span className="link-card-title">{label || href}</span>
+            <span className="link-card-url">
+              <b>{host}</b>
+              {pathOf(href)}
+            </span>
+          </span>
+          <ExternalLink size={12} strokeWidth={1.8} className="link-card-icon" />
+        </span>
+      )}
+    </a>
+  );
 }
 
 /** Real reasoning only: hidden when the model sends none, collapsible always. */

@@ -29,8 +29,22 @@ class Config(BaseModel):
 
     ollama_url: str = DEFAULT_OLLAMA_URL
     model: str | None = None
-    #: None = automatic (follow model capability), True/False = explicit request
-    think: bool | None = None
+    #: None = automatic (follow model capability), True/False = explicit request,
+    #: "low"/"medium"/"high"/"max" = explicit reasoning level (new Ollama API).
+    think: bool | Literal["low", "medium", "high", "max"] | None = None
+    #: How the agent picks reasoning depth when ``think`` is None:
+    #: auto = per-request heuristic, fast/normal/deep = fixed level presets.
+    thinking_mode: Literal["auto", "fast", "normal", "deep"] = "auto"
+    #: How long Ollama keeps the model in memory (warm-up pays off then)
+    keep_alive: str = "30m"
+    #: Load the active model into memory in the background right after boot
+    warmup_model: bool = True
+    #: Real Ollama context window override (None = model default)
+    num_ctx: int | None = Field(default=None, ge=512, le=131072)
+    #: Real Ollama generation cap (None = model default)
+    num_predict: int | None = Field(default=None, ge=16, le=131072)
+    #: How many previous messages are sent back to the model
+    context_messages: int = Field(default=20, ge=4, le=200)
     #: Enable the web-search capability (search still only runs when needed)
     web_search_enabled: bool = True
     #: Give the model real filesystem tools inside the workspace

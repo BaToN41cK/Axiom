@@ -137,7 +137,8 @@ export default function ModelSelector(props: Props) {
           <div className="model-menu-list">
             {!loading && items.length === 0 && !error && (
               <div className="model-menu-empty">
-                Модели не найдены. Установите: <code>ollama pull qwen3:8b</code>
+                Моделей пока нет. Установите через <code>ollama pull qwen3:8b</code> или подключите
+                API-провайдера — список подтянется автоматически.
               </div>
             )}
             {items.map((model, index) => {

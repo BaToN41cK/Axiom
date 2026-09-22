@@ -117,6 +117,8 @@ def _event_json(e: ChatEvent) -> dict:
             "tokensOut": e.tokens_out,
             "tokensIn": e.tokens_in,
             "tokensPerSecond": e.tokens_per_second,
+            "ttftMs": e.ttft_ms,
+            "loadMs": e.load_ms,
         }
     return {"type": type(e).__name__}
 
@@ -180,6 +182,12 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         loaded: set[str] = set()
         if report.ollama_available:
             loaded = await session.registry.running_names()
+        # Fire the background model warm-up once boot selects a model; the
+        # splash screen is not delayed by it (fire-and-forget task).
+        if report.ollama_available and report.selected is not None and session.config.warmup_model:
+            session.core_warmup_task = asyncio.create_task(
+                session.warmup_model(report.selected.name)
+            )
         return {
             "available": report.ollama_available,
             "version": report.version,
@@ -225,6 +233,11 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
                 args.get("text", ""),
                 force_search=bool(args.get("forceSearch", False)),
             ),
+        )
+    if cmd == "continue_last":
+        return await _stream_turn(
+            session,
+            session.continue_last(force_search=bool(args.get("forceSearch", False))),
         )
     if cmd == "cancel":
         return {"cancelled": session.cancel()}
@@ -356,6 +369,10 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         history_store = getattr(session, "history_store", None)
         if history_store is not None:
             history_store.set_limit(new_cfg.history_limit if new_cfg.save_history else None)
+        # Live Ollama transport settings — keep_alive on the client.
+        client = getattr(session, "client", None)
+        if client is not None:
+            client.keep_alive = new_cfg.keep_alive
         # Live workspace settings — root / terminal / access mode.
         ws_tools = getattr(session, "workspace_tools", None)
         if ws_tools is not None and new_cfg.workspace_tools_enabled and new_cfg.workspace_root:
@@ -379,7 +396,19 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
             new_terminal.register(session.tools)
         return json.loads(new_cfg.model_dump_json())
     if cmd == "set_model":
-        return _model_json(await session.switch_model(args["name"]))
+        model = await session.switch_model(args["name"])
+        # Warm the new model in the background; the reply is not delayed.
+        if session.config.warmup_model:
+            session.core_warmup_task = asyncio.create_task(session.warmup_model(model.name))
+        return _model_json(model)
+    if cmd == "warmup":
+        task = getattr(session, "core_warmup_task", None)
+        if task is not None and not task.done():
+            return {"warmed": False, "pending": True}
+        session.core_warmup_task = asyncio.create_task(
+            session.warmup_model(args.get("name"))
+        )
+        return {"warmed": False, "pending": True}
     if cmd == "state":
         return await _state_json(session)
     raise ValueError(f"Unknown command: {cmd}")

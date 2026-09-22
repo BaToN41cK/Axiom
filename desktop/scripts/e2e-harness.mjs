@@ -855,11 +855,11 @@ const panelW = () => evaluate(`(() => {
   return Math.round(el.getBoundingClientRect().width);
 })()`);
 
-const t1 = await hitTest('header .icon-btn[aria-label="Скрыть панель"]');
+const t1 = await hitTest('header .icon-btn[aria-label=\"Панель показать, скрыть R\"]');
 check("toggle button hit-testable (open state)", t1.found && t1.topIsSelfOrChild, JSON.stringify(t1));
 check("toggle button has a usable click area", (t1.w ?? 0) >= 28 && (t1.h ?? 0) >= 28, `${t1.w}x${t1.h}`);
 
-await realClick('header .icon-btn[aria-label="Скрыть панель"]');
+await realClick('header .icon-btn[aria-label=\"Панель показать, скрыть R\"]');
 await sleep(600);
 const wClosed = await panelW();
 check("panel width is 0 after a real mouse click", wClosed === 0, String(wClosed));
@@ -883,17 +883,17 @@ const overlayFree = await evaluate(`(() => {
 })()`);
 check("no invisible layer blocks the chat when closed", overlayFree);
 
-const t2 = await hitTest('header .icon-btn[aria-label="Показать панель"]');
+const t2 = await hitTest('header .icon-btn[aria-label=\"Панель показать, скрыть R\"]');
 check("reopen button hit-testable when closed", t2.found && t2.topIsSelfOrChild, JSON.stringify(t2));
 
-await realClick('header .icon-btn[aria-label="Показать панель"]');
+await realClick('header .icon-btn[aria-label=\"Панель показать, скрыть R\"]');
 await sleep(600);
 check("panel reopened (width > 300)", (await panelW()) > 300, String(await panelW()));
 
-await realClick('header .icon-btn[aria-label="Скрыть панель"]');
+await realClick('header .icon-btn[aria-label=\"Панель показать, скрыть R\"]');
 await sleep(600);
 check("2nd close works", (await panelW()) === 0);
-await realClick('header .icon-btn[aria-label="Показать панель"]');
+await realClick('header .icon-btn[aria-label=\"Панель показать, скрыть R\"]');
 await sleep(600);
 check("2nd reopen works", (await panelW()) > 300);
 

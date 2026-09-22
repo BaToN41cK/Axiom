@@ -193,8 +193,13 @@ class ChatStreamParser:
 class OllamaClient:
     """Async HTTP client for a local (or remote) Ollama server."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434") -> None:
+    def __init__(
+        self, base_url: str = "http://127.0.0.1:11434", keep_alive: str | None = None
+    ) -> None:
         self._base_url = base_url.rstrip("/")
+        #: Sent with every generation/load request so a warmed model stays
+        #: resident (e.g. "30m"); None = Ollama default (5m).
+        self.keep_alive = keep_alive
 
     @property
     def base_url(self) -> str:
@@ -262,6 +267,32 @@ class OllamaClient:
             return []
         return [m for m in models if isinstance(m, dict)]
 
+    #: Generations are cheap once the weights are resident; a cold load can
+    #: take minutes on a low-resource machine, so the warm-up timeout exceeds
+    #: the default 600s request timeout.
+    _WARMUP_TIMEOUT = httpx.Timeout(900.0, connect=10.0)
+
+    async def warmup(self, model: str) -> bool:
+        """Load a model into memory in the background (best-effort).
+
+        Sends a minimal non-streaming chat request whose only real effect is
+        loading the weights; ``keep_alive`` keeps them resident afterwards.
+        Never raises — a failed warm-up must not break the session.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [{"role": "user", "content": ""}],
+            "stream": False,
+        }
+        if self.keep_alive is not None:
+            payload["keep_alive"] = self.keep_alive
+        try:
+            async with self._client(self._WARMUP_TIMEOUT) as client:
+                response = await client.post("/api/chat", json=payload)
+                return response.status_code == 200
+        except (httpx.HTTPError, OSError):
+            return False
+
     async def show_model(self, name: str) -> dict[str, Any]:
         """Real per-model detail from ``POST /api/show``.
 
@@ -290,21 +321,30 @@ class OllamaClient:
         model: str,
         messages: list[dict[str, Any]],
         *,
-        think: bool | None = None,
+        think: bool | str | None = None,
         tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream a chat generation as normalised :class:`StreamChunk` items."""
-        return self._chat_stream(model, messages, think=think, tools=tools, options=options)
+        return self._chat_stream(
+            model,
+            messages,
+            think=think,
+            tools=tools,
+            options=options,
+            keep_alive=keep_alive,
+        )
 
     async def _chat_stream(
         self,
         model: str,
         messages: list[dict[str, Any]],
         *,
-        think: bool | None = None,
+        think: bool | str | None = None,
         tools: list[dict[str, Any]] | None = None,
         options: dict[str, Any] | None = None,
+        keep_alive: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         payload: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
         if think is not None:
@@ -314,6 +354,9 @@ class OllamaClient:
         if options:
             # Real Ollama generation parameters (temperature, num_ctx, ...).
             payload["options"] = options
+        effective_keep_alive = keep_alive if keep_alive is not None else self.keep_alive
+        if effective_keep_alive is not None:
+            payload["keep_alive"] = effective_keep_alive
 
         parser = ChatStreamParser()
         try:

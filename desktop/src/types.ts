@@ -94,7 +94,13 @@ export type Density = "compact" | "comfortable" | "spacious";
 export interface AxiomConfig {
   ollama_url: string;
   model: string | null;
-  think: boolean | null;
+  think: boolean | "low" | "medium" | "high" | "max" | null;
+  thinking_mode: "auto" | "fast" | "normal" | "deep";
+  keep_alive: string;
+  warmup_model: boolean;
+  num_ctx: number | null;
+  num_predict: number | null;
+  context_messages: number;
   web_search_enabled: boolean;
   workspace_tools_enabled: boolean;
   workspace_root: string | null;
@@ -134,6 +140,10 @@ export interface DoneMetrics {
   tokensOut: number | null;
   tokensIn: number | null;
   tokensPerSecond: number | null;
+  /** Real time to the first streamed token (measured by the core). */
+  ttftMs?: number | null;
+  /** Real model load time reported by Ollama for this generation (ms). */
+  loadMs?: number | null;
 }
 
 export type CoreEvent =

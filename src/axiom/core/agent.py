@@ -140,6 +140,8 @@ class PassResult:
     thinking: str = ""
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
+    #: Real time-to-first-token of this pass (measured, not estimated).
+    ttft_ms: int | None = None
 
 
 class Agent:
@@ -182,27 +184,76 @@ class Agent:
         messages.extend(history)
         return messages
 
-    def _think_flag(self, model: ModelInfo) -> bool | None:
-        """Explicit config wins; otherwise follow the model's real capability."""
-        if self._config.think is not None:
-            return self._config.think
-        if model.supports("thinking") is True:
-            return True
-        return None
+    def _think_param(self, model: ModelInfo, history: list[dict]) -> bool | str | None:
+        """Resolve the real ``think`` request parameter for this request.
 
-    def _tool_schemas(self, model: ModelInfo) -> list[dict] | None:
-        """Only offer tools the model actually reports support for."""
+        Priority: explicit config value (bool or level string) → thinking_mode
+        preset → per-request heuristic → model capability. Deterministic only:
+        the level depends on the message history shape, never on an extra LLM
+        classifier call (which would double the latency it tries to save).
+        """
+        explicit = self._config.think
+        if explicit is not None:
+            return explicit
+        mode = getattr(self._config, "thinking_mode", "auto")
+        level = {"fast": "low", "normal": "medium", "deep": "high"}.get(mode)
+        if level is not None:
+            return level
+        if model.supports("thinking") is not True:
+            return None
+        # Heuristic: hard tasks deserve deeper reasoning than small talk.
+        user_text = self._last_user_text(history)
+        if not user_text:
+            return "low"
+        text = user_text.lower()
+        if any(
+            marker in text
+            for marker in (
+                "почему", "придумай", "реши", "напиши", "рефактор", "отлад",
+                "debug", "why ", "explain", "design", "optimi", "architect",
+            )
+        ):
+            return "high"
+        if len(text) > 200:
+            return "medium"
+        return "low"
+
+    def _tool_schemas(
+        self, model: ModelInfo, user_text: str | None = None
+    ) -> list[dict] | None:
+        """Only offer tools the model supports AND this request plausibly needs.
+
+        A smaller tool schema means fewer prompt tokens per round on a local
+        model. Git tools are only advertised when the request mentions git;
+        file tools only when it mentions files/code or the request is clearly
+        about the project. Web tools stay always-on (cheap, two entries).
+        """
         if not self._config.web_search_enabled and not self._config.workspace_tools_enabled:
             return None
         if model.supports("tools") is not True:
             return None
         allowed: set[str] = set(OFFERED_TOOLS)
         if self._config.workspace_tools_enabled:
-            allowed.update(WORKSPACE_TOOLS)
-            allowed.update(GIT_TOOLS)
-            allowed.update(PROJECT_TOOLS)
-            if self._config.terminal_enabled and self._config.access_mode != "read_only":
-                allowed.add("run_command")
+            text = (user_text or "").lower()
+            mentions_git = any(
+                marker in text
+                for marker in ("git", "коммит", "commit", "ветк", "branch", "diff", "лог", "log")
+            )
+            mentions_files = any(
+                marker in text
+                for marker in (
+                    "файл", "функци", "код", "проект", "папк", "рефактор", "ошибк",
+                    "file", "code", "project", "folder", "refactor", "bug", "implement",
+                    "test", "тест", "script", "скрипт", "модул", "class", "класс",
+                )
+            )
+            if mentions_git:
+                allowed.update(GIT_TOOLS)
+            if mentions_files or not text:
+                allowed.update(WORKSPACE_TOOLS)
+                allowed.update(PROJECT_TOOLS)
+                if self._config.terminal_enabled and self._config.access_mode != "read_only":
+                    allowed.add("run_command")
         schemas = [s for s in self._registry.schemas() if s["function"]["name"] in allowed]
         return schemas or None
 
@@ -212,18 +263,25 @@ class Agent:
         return value if isinstance(value, int) else None
 
     @staticmethod
-    def _metrics(metrics: dict, started: float) -> dict:
+    def _metrics(metrics: dict, started: float, ttft_ms: int | None = None) -> dict:
         """Normalise Ollama metrics into UI-friendly values."""
         eval_count = metrics.get("eval_count")
         eval_duration = metrics.get("eval_duration")
         per_second = None
         if isinstance(eval_count, int) and isinstance(eval_duration, int) and eval_duration > 0:
             per_second = round(eval_count / (eval_duration / 1_000_000_000), 1)
+        load_duration = metrics.get("load_duration")
         return {
             "duration_ms": int((time.perf_counter() - started) * 1000),
             "tokens_out": eval_count if isinstance(eval_count, int) else None,
             "tokens_in": Agent._int_or_none(metrics.get("prompt_eval_count")),
             "tokens_per_second": per_second,
+            "ttft_ms": ttft_ms,
+            "load_ms": (
+                round(load_duration / 1_000_000)
+                if isinstance(load_duration, int) and load_duration > 0
+                else None
+            ),
         }
 
     # ------------------------------------------------------------- model pass
@@ -233,19 +291,35 @@ class Agent:
         messages: list[dict],
         model: ModelInfo,
         *,
-        think: bool | None,
+        think: bool | str | None,
         tools: list[dict] | None,
         result: PassResult,
     ) -> AsyncIterator[ChatEvent]:
         """Stream one real model pass, emitting reasoning/content deltas."""
+        stream_started = time.perf_counter()
         saw_thinking = False
         saw_content = False
+        first_token_at: float | None = None
         options: dict = {}
         if self._config.temperature is not None:
             options["temperature"] = self._config.temperature
+        num_ctx = getattr(self._config, "num_ctx", None)
+        if isinstance(num_ctx, int):
+            options["num_ctx"] = num_ctx
+        num_predict = getattr(self._config, "num_predict", None)
+        if isinstance(num_predict, int):
+            options["num_predict"] = num_predict
         async for chunk in self._client.chat(
-            model.name, messages, think=think, tools=tools, options=options or None
+            model.name,
+            messages,
+            think=think,
+            tools=tools,
+            options=options or None,
+            keep_alive=getattr(self._config, "keep_alive", None),
         ):
+            if first_token_at is None and (chunk.thinking or chunk.content or chunk.tool_calls):
+                first_token_at = time.perf_counter()
+                result.ttft_ms = int((first_token_at - stream_started) * 1000)
             if chunk.thinking:
                 if not saw_thinking:
                     saw_thinking = True
@@ -398,6 +472,7 @@ class Agent:
         self.last_thinking = ""
         self.last_metrics: dict = {}
         self._pasted_pages = []
+        last_ttft: int | None = None
 
         system = self._config.system_prompt or DEFAULT_SYSTEM_PROMPT
         if self._config.workspace_tools_enabled and self._config.system_prompt is None:
@@ -458,10 +533,11 @@ class Agent:
                 system = f"{system}\n\n{PAGE_SYSTEM_PROMPT}\n\nLive pages:\n{page_block}"
 
         messages = self._build_messages(history, system)
-        think = self._think_flag(model)
+        think = self._think_param(model, history)
+        user_text = self._last_user_text(history)
         rounds = 0
         while True:
-            tools = self._tool_schemas(model)
+            tools = self._tool_schemas(model, user_text)
             status = self._status(GenerationState.CONNECTING, detail=model.name)
             if status:
                 yield status
@@ -475,6 +551,7 @@ class Agent:
             self.last_thinking += result.thinking
             if result.metrics:
                 self.last_metrics = result.metrics
+            last_ttft = result.ttft_ms if result.ttft_ms is not None else last_ttft
 
             if not result.tool_calls:
                 break
@@ -498,7 +575,7 @@ class Agent:
                         }
                     )
 
-        self.metrics = self._metrics(self.last_metrics, started)
+        self.metrics = self._metrics(self.last_metrics, started, ttft_ms=last_ttft)
 
     @staticmethod
     def _last_user_text(history: list[dict]) -> str:
