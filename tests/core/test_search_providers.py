@@ -70,3 +70,109 @@ async def test_multi_fetch_raises_when_all_providers_fail() -> None:
     provider: MultiSearchProvider = MultiSearchProvider([Failing()])
     with pytest.raises(SearchUnavailableError):
         await provider.fetch("https://example.com")
+
+
+# ------------------------------------------------------------- regional chain
+
+
+def test_default_chain_includes_regional_fallbacks() -> None:
+    names = [p.name for p in MultiSearchProvider().providers]
+    assert names[:2] == ["Brave", "DuckDuckGo"]
+    # SearXNG keeps the chain alive where the direct engines are blocked,
+    # Wikipedia remains the always-available last resort.
+    assert "SearXNG" in names
+    assert names[-1] == "Wikipedia"
+
+
+def test_searxng_parse_extracts_results() -> None:
+    from axiom.core.search.searxng import SearXNGProvider
+
+    page = """
+    <article class="result result-default" data-v="1">
+      <h3><a href="https://en.wikipedia.org/wiki/Test" class="url_wrapper">Test - <b>Wikipedia</b></a></h3>
+      <p class="content">Test (assessment), an educational assessment.</p>
+    </article>
+    <article class="result result-default" data-v="1">
+      <h3><a href="/search?q=other">Other query</a></h3>
+      <p class="content">Instance-internal link, must be skipped.</p>
+    </article>
+    <article class="result result-default" data-v="1">
+      <h3><a href="https://example.com/a">Second &amp; result</a></h3>
+      <p>Another snippet</p>
+    </article>
+    """
+    results = SearXNGProvider._parse(page, "https://opnxng.com")
+    assert len(results) == 2
+    assert results[0].url == "https://en.wikipedia.org/wiki/Test"
+    assert results[0].title == "Test - Wikipedia"
+    assert "educational assessment" in results[0].snippet
+    assert results[1].url == "https://example.com/a"
+
+
+def test_searxng_skips_instance_when_no_results() -> None:
+    from axiom.core.search.searxng import SearXNGProvider
+
+    class Empty(SearXNGProvider):
+        async def _get(self, url: str, params: dict[str, str]) -> str:
+            return "<html><body>nothing here</body></html>"
+
+    provider = Empty(instances=("https://one.example", "https://two.example"))
+    with pytest.raises(SearchUnavailableError) as exc_info:
+        import asyncio
+
+        asyncio.run(provider.search("test"))
+    assert "one.example" in (exc_info.value.hint or "")
+    assert "two.example" in (exc_info.value.hint or "")
+
+
+# -------------------------------------------------------- transient retries
+
+
+def test_retryable_walks_wrapped_cause_chain() -> None:
+    import httpx
+
+    from axiom.core.retry import is_retryable_error
+
+    # Providers wrap transport errors into SearchUnavailableError; the cause
+    # chain must still make the wrapper retryable.
+    try:
+        try:
+            raise httpx.ConnectError("connection refused")
+        except httpx.ConnectError as inner:
+            raise SearchUnavailableError("Web search is unavailable.") from inner
+    except SearchUnavailableError as wrapped:
+        assert is_retryable_error(wrapped) is True
+
+    # A plain logic error is not a network problem: no retry.
+    assert is_retryable_error(ValueError("bad markup")) is False
+
+
+async def test_multi_retries_transient_provider_failure() -> None:
+    import httpx
+
+    class Flaky(SearchProvider):
+        name = "flaky"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search(self, query: str, limit: int = 5) -> list[SearchResult]:
+            self.calls += 1
+            if self.calls == 1:
+                try:
+                    raise httpx.ConnectError("vpn switch dropped the socket")
+                except httpx.ConnectError as inner:
+                    raise SearchUnavailableError("Web search is unavailable.") from inner
+            return [SearchResult(title="hit", url="https://example.com/ok")]
+
+        async def fetch(self, url: str, max_chars: int = 4000) -> str:
+            raise SearchUnavailableError("nope")
+
+    flaky = Flaky()
+    provider = MultiSearchProvider([flaky])
+    # Keep the retry wait short in tests.
+    provider.TRANSIENT_RETRY_DELAY = 0.0
+    results = await provider.search("anything")
+    assert flaky.calls == 2
+    assert results[0].url == "https://example.com/ok"
+    assert provider.last_provider == "flaky"

@@ -14,6 +14,12 @@ from pydantic import BaseModel, Field
 from axiom.core.state import GenerationState
 
 
+class Event(BaseModel):
+    """Base class for all AXIOM events."""
+
+    type: str = "event"
+
+
 class Message(BaseModel):
     """A chat message (role: user / assistant / system / tool)."""
 

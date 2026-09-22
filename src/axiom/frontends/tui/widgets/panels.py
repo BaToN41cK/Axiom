@@ -440,6 +440,56 @@ class SettingsPanel(PanelScreen):
             pass  # persistence must never break the panel
 
 
+class ProfilePanel(PanelScreen):
+    """``/profiles`` — system prompt profile selector.
+
+    Shows all profiles with a marker for the currently active one.
+    Arrow keys to navigate, Enter to select, Escape to close.
+    """
+
+    title_text = "PROFILES"
+
+    def __init__(
+        self,
+        profiles: dict[str, str],
+        active: str,
+        *,
+        on_select: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        super().__init__()
+        self._profiles = profiles
+        self._active = active
+        self._on_select = on_select
+
+    def keys_hint(self) -> str:
+        past = [f"✓ {self._active}"]
+        return " ↑↓  select  ·  " + "  ".join(past) + "  ·  esc  close"
+
+    def subtitle_lines(self) -> list[str]:
+        return [f"Active: {theme.ARROW} {self._active}"]
+
+    def body(self) -> ComposeResult:
+        yield Static(f"Active profile: {self._active}", id="profile-current", markup=False)
+        with OptionList(id="profile-list"):
+            for name, prompt in self._profiles.items():
+                glyph = theme.ARROW if name == self._active else " "
+                label = f"{glyph} {name}"
+                # Truncate prompt preview to first line
+                preview = prompt.split("\n")[0][:80]
+                if len(prompt.split("\n")[0]) > 80:
+                    preview += "…"
+                rows = Option(f"{label}\n    {preview}", id=name)
+                yield rows
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        name = str(event.option.id) if event.option.id else ""
+        if name and name in self._profiles:
+            self.dismiss(name)
+        else:
+            if self.app is not None:
+                self.app.notify(f"Unknown profile: {name}", severity="warning", timeout=3)
+
+
 class StatusPanel(PanelScreen):
     """``/status`` — real system status: server, model, capabilities, metrics."""
 

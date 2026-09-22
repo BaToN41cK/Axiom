@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { Moon, PanelRightClose, PanelRightOpen, Sun } from "lucide-react";
 import BootScreen from "./components/BootScreen";
 import ProjectSelector from "./components/ProjectSelector";
@@ -17,8 +18,40 @@ import type { AxiomStore } from "./hooks/useAxiom";
 
 function WorkbenchSide({ store: s }: { store: AxiomStore }) {
   const [tab, setTab] = useState<"files" | "terminal" | "git">("files");
+  // Drag-to-resize of the tools panel (§8). Width lives in the store and is
+  // persisted; the CSS transition is switched off while dragging (body.resizing).
+  const dragging = useRef(false);
+  const lastWidth = useRef(s.rightPanelWidth);
+  useEffect(() => {
+    const onMove = (event: MouseEvent) => {
+      if (!dragging.current) return;
+      const next = Math.min(680, Math.max(240, window.innerWidth - event.clientX));
+      lastWidth.current = next;
+      s.setRightPanelWidth(next);
+    };
+    const onUp = () => {
+      if (!dragging.current) return;
+      dragging.current = false;
+      document.body.classList.remove("resizing");
+      s.commitRightPanelWidth(lastWidth.current);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [s]);
+  const startDrag = () => {
+    dragging.current = true;
+    document.body.classList.add("resizing");
+  };
   return (
-    <aside className="workbench-side">
+    <aside
+      className="workbench-side"
+      style={{ "--side-w": `${s.rightPanelWidth}px` } as CSSProperties}
+    >
+      <div className="side-resizer" onMouseDown={startDrag} title="Изменить размер панели" />
       <div className="side-tabs">
         <button className={tab === "files" ? "active" : ""} onClick={() => setTab("files")}>Файлы</button>
         <button className={tab === "terminal" ? "active" : ""} onClick={() => setTab("terminal")}>Терминал</button>
@@ -29,6 +62,7 @@ function WorkbenchSide({ store: s }: { store: AxiomStore }) {
           root={s.workspace?.current?.path ?? null}
           tree={s.tree}
           loading={s.treeLoading}
+          gitStatus={s.gitStatus?.ok ? s.gitStatus.content : null}
           openFile={s.openFile}
           onRefresh={() => void s.loadTree()}
           onOpenFile={(p) => void s.openWorkspaceFile(p)}

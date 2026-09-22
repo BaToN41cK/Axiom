@@ -39,6 +39,7 @@ from axiom.frontends.tui.widgets.panels import (
     HelpPanel,
     HistoryPanel,
     ModelPanel,
+    ProfilePanel,
     SettingsPanel,
     StatusPanel,
 )
@@ -54,6 +55,11 @@ class WorkspaceScreen(Screen):
         Binding("ctrl+c", "stop_generation", "Stop", priority=True),
         Binding("escape", "stop_generation", "Stop", show=False),
     ]
+
+    #: Auto-focus is disabled on this screen so the hidden slash-menu list
+    #: can never steal focus from the prompt at startup; on_show() focuses
+    #: the prompt explicitly once the screen is live.
+    AUTO_FOCUS = None
 
     def __init__(
         self,
@@ -85,7 +91,16 @@ class WorkspaceScreen(Screen):
         connected = self._version is not None
         self.query_one(HeaderBar).set_connection(connected, self._version)
         self.status_bar.set_connection(connected, self._version)
-        self.input_bar.input.focus()
+
+    def on_show(self) -> None:
+        # on_mount runs before this screen is active; a focus() there races the
+        # ScreenResume that follows push_screen() and is dropped. Focus only
+        # once the workspace screen is actually live, so the very first `/`
+        # lands in the input.
+        try:
+            self.input_bar.input.focus()
+        except Exception:  # pragma: no cover - teardown race
+            pass
 
     # ------------------------------------------------------------------ helpers
 
@@ -355,6 +370,23 @@ class WorkspaceScreen(Screen):
                     metrics=self.session.last_metrics,
                 )
             )
+        elif name == "/permissions":
+            # Show current permission mode as a notification for now
+            mode = self.session.config.permission_mode
+            self.notify(
+                f"Permission mode: {mode}  "
+                f"(Use /settings to change, or edit ~/.axiom/config.json)",
+                title="Permissions",
+                timeout=5,
+            )
+        elif name == "/profiles":
+            self.app.push_screen(
+                ProfilePanel(
+                    self.session.profiles.all,
+                    self.session.profiles.active_name,
+                ),
+                callback=self._profile_chosen,
+            )
 
     # ------------------------------------------------------------------ panels
 
@@ -418,6 +450,9 @@ class AxiomApp(App):
 
     CSS_PATH = "theme.tcss"
     TITLE = "AXIOM"
+
+    #: App-level auto-focus is off; each screen manages focus explicitly.
+    AUTO_FOCUS = None
 
     def __init__(self, session: ChatSession | None = None) -> None:
         super().__init__()

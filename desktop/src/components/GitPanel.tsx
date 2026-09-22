@@ -17,7 +17,22 @@ interface Props {
 /** Git panel: branch / status / log (§17). Read-only facts from the backend. */
 export default function GitPanel(props: Props) {
   const { project, status, log, onRefresh } = props;
-  if (!project?.git) return null;
+  // Global Chat: no project → no git state to show. Keep an explicit empty
+  // state so the tab never looks broken/blank.
+  if (!project) {
+    return (
+      <section className="gitpanel">
+        <div className="git-empty ex-empty">Проект не открыт — Git недоступен</div>
+      </section>
+    );
+  }
+  if (!project.git) {
+    return (
+      <section className="gitpanel">
+        <div className="git-empty ex-empty">Папка не является git-репозиторием</div>
+      </section>
+    );
+  }
   return (
     <section className="gitpanel">
       <div className="ex-head">

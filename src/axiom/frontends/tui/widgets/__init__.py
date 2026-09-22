@@ -3,7 +3,8 @@
 * ``commands``  — slash-command data plus the ``/`` autocomplete menu.
 * ``header``    — identity bar and the live status bar.
 * ``messages``  — user/assistant turns and the scrolling conversation.
-* ``panels``    — modal panels (models, history, settings, help, status).
+* ``panels``    — modal panels (models, history, settings, help, status, profiles).
+* ``permissions`` — permission request dialog for ask mode.
 * ``prompt``    — the multiline input bar with its Stop control.
 * ``reasoning`` — streaming text and the collapsible thinking block.
 * ``search``    — the web-search block with clickable sources.

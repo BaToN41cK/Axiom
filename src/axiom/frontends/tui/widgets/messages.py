@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from textual.containers import Container, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Markdown, Static
 from textual.widgets._markdown import MarkdownStream
@@ -78,10 +78,12 @@ class AssistantMessage(Container):
         yield Static("", id="assistant-status", classes="assistant-status")
         yield Static(f"{theme.ANSWER_GLYPH} ANSWER", id="answer-label", classes="block-label")
         yield Markdown("", id="answer-markdown")
+        yield Horizontal(id="code-actions")
 
     def on_mount(self) -> None:
         self.query_one("#answer-label", Static).display = False
         self.query_one("#answer-markdown", Markdown).display = False
+        self.query_one("#code-actions", Horizontal).display = False
         if self._animations:
             self._timer = self.set_interval(theme.SPINNER_INTERVAL, self._animate_status)
         self._refresh_status()
@@ -319,6 +321,23 @@ class AssistantMessage(Container):
             await self._stream.stop()
             self._stream = None
 
+    def _show_code_actions(self) -> None:
+        """Show copy-to-clipboard and run-code buttons after answer is ready."""
+        actions = self.query_one("#code-actions", Horizontal)
+        if actions.display:
+            return
+        markdown = self.query_one("#answer-markdown", Markdown)
+        content = markdown.renderable if hasattr(markdown, "renderable") else ""
+        if not content:
+            return
+        actions.remove_all()
+        # Short label so it stays minimal
+        from textual.widgets import Static as ActionStatic
+        copy_btn = ActionStatic("📋 Copy", classes="code-action", markup=False)
+        run_btn = ActionStatic("▶ Run", classes="code-action", markup=False)
+        actions.mount_all([copy_btn, run_btn])
+        actions.display = True
+
     # ----------------------------------------------------------- errors / notes
 
     def add_error(self, message: str, hint: str | None = None) -> None:
@@ -334,6 +353,9 @@ class AssistantMessage(Container):
 
 class ChatView(VerticalScroll):
     """The conversation area: auto-follows new output unless the user scrolls up."""
+
+    #: Scrolling chat log; keyboard stays in the prompt (mouse/End scroll).
+    can_focus = False
 
     def __init__(self, **kwargs) -> None:
         super().__init__(id="chat-view", **kwargs)

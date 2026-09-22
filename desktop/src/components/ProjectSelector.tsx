@@ -16,11 +16,15 @@ interface Props {
 /**
  * Project/workspace selector in the top bar (§3).
  * Reuses the existing backend (set_workspace / clear_workspace / pin) —
- * the "Global Chat" entry is the real `clear_workspace` bridge command.
+ * the "Global Chat" entry is the real `clear_workspace` bridge command and
+ * switches immediately (no confirmation — the user can always switch back).
+ * Removing a project from the list (✕) asks for confirmation: the dialog makes
+ * clear that only the list entry is dropped, never the project on disk.
  */
 export default function ProjectSelector(props: Props) {
   const { current, recent, pinned, onOpen, onSwitch, onClear, onRemove, onTogglePin } = props;
   const [open, setOpen] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
@@ -66,6 +70,13 @@ export default function ProjectSelector(props: Props) {
               >
                 <Pin size={12} strokeWidth={1.8} fill={currentPinned ? "currentColor" : "none"} />
               </button>
+              <button
+                className="icon-btn tiny ws-leave"
+                title="Удалить проект из списка"
+                onClick={() => setConfirmRemove(current.path)}
+              >
+                <X size={12} strokeWidth={1.8} />
+              </button>
             </div>
           )}
           {pinned.filter((p) => p.path !== current?.path).length > 0 && (
@@ -109,7 +120,7 @@ export default function ProjectSelector(props: Props) {
                   <span className="ws-item-path">{p.path}</span>
                 </span>
               </button>
-              <button className="icon-btn tiny" title="Убрать из списка" onClick={() => void onRemove(p.path)}>
+              <button className="icon-btn tiny" title="Удалить из списка" onClick={() => setConfirmRemove(p.path)}>
                 <X size={12} strokeWidth={1.8} />
               </button>
             </div>
@@ -141,6 +152,39 @@ export default function ProjectSelector(props: Props) {
           <button className="ws-open" onClick={() => { setOpen(false); void onOpen(); }}>
             <FolderOpen size={14} strokeWidth={1.8} /> Открыть проект…
           </button>
+        </div>
+      )}
+
+      {confirmRemove && (
+        <div className="modal-backdrop" onClick={() => setConfirmRemove(null)}>
+          <div className="modal confirm" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h2>⚠ Удалить проект из списка?</h2>
+            </div>
+            <div className="modal-body">
+              <code className="confirm-detail">{confirmRemove}</code>
+              <p className="about-text">
+                Проект исчезнет из списка селектора. <b>Файлы на диске не удаляются</b>,
+                а открытый проект останется активным, пока вы не переключитесь сами.
+                Вернуть его в список можно кнопкой «Открыть проект…».
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button className="btn ghost" onClick={() => setConfirmRemove(null)}>Отказаться</button>
+              <div className="modal-foot-spacer" />
+              <button
+                className="btn danger"
+                onClick={() => {
+                  const target = confirmRemove;
+                  setConfirmRemove(null);
+                  setOpen(false);
+                  if (target) void onRemove(target);
+                }}
+              >
+                Удалить из списка
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

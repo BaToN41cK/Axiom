@@ -7,6 +7,9 @@ export default defineConfig({
   // Tauri expects a fixed port and the env var guarded entry
   clearScreen: false,
   server: {
+    // A literal IP (not "localhost") keeps the URL stable when VPN adapters
+    // change how the name resolves between IPv4 and IPv6.
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
   },

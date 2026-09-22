@@ -232,6 +232,16 @@ export function useAxiom() {
       return true;
     }
   });
+  // Resizable width of the same panel (§8): persisted next to the open/closed
+  // flag so a restored session keeps the user's layout.
+  const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem("axiom.rightPanelWidth"));
+      return Number.isFinite(saved) && saved >= 240 && saved <= 680 ? saved : 340;
+    } catch {
+      return 340;
+    }
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
   const [overlay, setOverlay] = useState<Overlay>(null);
@@ -973,6 +983,15 @@ export function useAxiom() {
     });
   }
 
+  function commitRightPanelWidth(width: number) {
+    setRightPanelWidth(width);
+    try {
+      localStorage.setItem("axiom.rightPanelWidth", String(width));
+    } catch {
+      /* storage unavailable — session-only state */
+    }
+  }
+
   function commitSidebarWidth(width: number) {
     setSidebarWidth(width);
     if (config && config.sidebar_width !== width) void saveConfig({ sidebar_width: width });
@@ -1218,7 +1237,10 @@ export function useAxiom() {
   async function removeWorkspace(path: string) {
     try {
       await request("remove_workspace", { path });
-      await loadWorkspace();
+      // The backend store changed (recent + pinned) — refresh both the current
+      // workspace and the selector lists, otherwise the removed project keeps
+      // rendering from the stale `recent` state.
+      await Promise.all([loadWorkspace(), loadProjectList()]);
     } catch (err) {
       notify(errorText(err), "error");
     }
@@ -1404,6 +1426,9 @@ export function useAxiom() {
     commitSidebarWidth,
     rightPanelOpen,
     toggleRightPanel,
+    rightPanelWidth,
+    setRightPanelWidth,
+    commitRightPanelWidth,
     settingsOpen,
     setSettingsOpen,
     settingsSection,

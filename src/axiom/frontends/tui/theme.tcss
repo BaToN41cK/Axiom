@@ -482,3 +482,136 @@ PanelScreen {
 .search-panel {
     margin-left: 1;
 }
+
+/* -------------------------------------------------------- code-action buttons */
+
+#code-actions {
+    height: auto;
+    margin: 0 0 0 2;
+    padding: 0;
+}
+
+.code-action {
+    width: auto;
+    color: #777777;
+    background: #0A0A0A;
+    border: none;
+    padding: 0 1;
+    margin: 0 1 0 0;
+}
+
+.code-action:hover {
+    color: #FFFFFF;
+    background: #3B0A10;
+}
+
+/* -------------------------------------------------------- permission dialog */
+
+#perm-overlay {
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+}
+
+#perm-dialog {
+    width: 52;
+    height: auto;
+    border: round #6B141C;
+    background: #080808;
+    padding: 1 2;
+    align: center middle;
+    margin: 6 0 0 0;
+}
+
+#perm-title {
+    color: #6B141C;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#perm-tool {
+    color: #FFFFFF;
+    margin-bottom: 1;
+}
+
+#perm-args {
+    color: #B9B9B9;
+    margin: 0 0 1 2;
+}
+
+#perm-prompt {
+    color: #FFFFFF;
+    margin-bottom: 1;
+}
+
+#perm-buttons {
+    height: auto;
+    align: center middle;
+}
+
+#perm-approve {
+    width: 12;
+    margin-right: 2;
+    background: #3B0A10;
+    border: round #6B141C;
+    color: #FFFFFF;
+}
+
+#perm-approve:hover {
+    background: #4A0E14;
+}
+
+#perm-deny {
+    width: 10;
+    background: #161616;
+    border: round #3A3A3A;
+    color: #8E3038;
+}
+
+#perm-deny:hover {
+    border: round #8E3038;
+}
+
+/* --------------------------------------------------------- profile panel */
+
+#profile-list {
+    height: auto;
+    max-height: 20;
+    background: transparent;
+}
+
+#profile-current {
+    color: #777777;
+    margin-bottom: 1;
+}
+
+.profile-row {
+    height: auto;
+    margin-bottom: 0;
+}
+
+.profile-row:hover {
+    background: #161616;
+}
+
+.profile-row.selected {
+    background: #3B0A10;
+    color: #FFFFFF;
+}
+
+.profile-name {
+    width: 1fr;
+    color: #FFFFFF;
+    text-style: bold;
+}
+
+.profile-glyph {
+    width: auto;
+    color: #6B141C;
+    margin-right: 1;
+}
+
+.profile-prompt-preview {
+    color: #777777;
+    margin: 0 0 0 4;
+}

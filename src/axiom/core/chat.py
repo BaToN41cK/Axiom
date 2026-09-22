@@ -36,6 +36,7 @@ from axiom.core.events import (
 from axiom.core.history import Conversation, HistoryStore
 from axiom.core.models import ModelInfo, ModelRegistry
 from axiom.core.ollama import OllamaClient
+from axiom.core.profiles import ProfileManager
 from axiom.core.search.multi import MultiSearchProvider
 from axiom.core.search.provider import SearchProvider
 from axiom.core.state import GenerationState
@@ -153,6 +154,8 @@ class ChatSession:
         self.active_model: ModelInfo | None = None
         self.last_metrics: dict = {}
         self._task: asyncio.Task | None = None
+        #: Profile manager — system prompt profiles
+        self.profiles = ProfileManager()
 
     # ------------------------------------------------------------- lifecycle
 
@@ -296,9 +299,11 @@ class ChatSession:
 
     @property
     def workspace_root(self) -> Path | None:
-        if self.workspace_tools is not None:
-            return self.workspace_tools.root
-        return None
+        # Global Chat turns workspace tooling off; reporting a root then would
+        # keep the GUI (explorer / git / terminal) bound to a closed project.
+        if self.workspace_tools is None or not self.config.workspace_tools_enabled:
+            return None
+        return self.workspace_tools.root
 
     def workspace_info(self) -> ProjectInfo | None:
         root = self.workspace_root
@@ -588,6 +593,9 @@ class ChatSession:
                 )
             )
             self.conversation.derive_title()
+            # Persist the user turn immediately: the chat appears in the
+            # sidebar at once and survives a core crash mid-generation.
+            self._save_conversation()
         elif images:
             # Regeneration keeps the original images of the recorded user turn.
             self.conversation.messages.append(

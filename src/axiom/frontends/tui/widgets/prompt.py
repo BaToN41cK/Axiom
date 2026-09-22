@@ -31,7 +31,7 @@ class AxiomInput(TextArea):
             soft_wrap=True,
             show_line_numbers=False,
             highlight_cursor_line=False,
-            tab_behavior="focus",
+            tab_behavior="insert",  # Tab completes slash commands, never leaves the input
             theme="css",
             **kwargs,
         )

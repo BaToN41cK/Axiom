@@ -61,6 +61,8 @@ class Config(BaseModel):
     #: Optional generation parameters
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     system_prompt: str | None = None
+    #: Global permission mode: ask, auto_approve_safe, auto_approve_all
+    permission_mode: str = "auto_approve_safe"
 
     # ------------------------------------------------------------ workspace UI
     #: UI density of the desktop workspace

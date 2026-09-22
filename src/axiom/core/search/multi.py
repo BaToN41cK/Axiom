@@ -6,7 +6,11 @@ serving real results. AXIOM therefore tries a *chain* of real providers and
 returns the first one that actually produced results, remembering which engine
 answered so the UI can report it truthfully.
 
-    Brave  →  DuckDuckGo  →  Wikipedia
+    Brave  →  DuckDuckGo  →  SearXNG  →  Wikipedia
+
+Each provider gets a short retry on transient network errors (a VPN
+reconnecting mid-request drops connections that a retry one second later
+survives), so a provider is only declared dead after real, repeated failure.
 
 If every provider fails, the original :class:`SearchUnavailableError` is raised:
 the UI then shows "Search unavailable" instead of inventing an answer.
@@ -17,15 +21,21 @@ from __future__ import annotations
 import httpx
 
 from axiom.core.errors import SearchUnavailableError
+from axiom.core.retry import retry_async
 from axiom.core.search.brave import BraveProvider
 from axiom.core.search.duckduckgo import DuckDuckGoProvider
 from axiom.core.search.provider import SearchProvider, SearchResult
+from axiom.core.search.searxng import SearXNGProvider
 from axiom.core.search.wikipedia import WikipediaProvider
 
 
 def default_chain() -> list[SearchProvider]:
-    """The providers AXIOM tries, in order of usefulness."""
-    return [BraveProvider(), DuckDuckGoProvider(), WikipediaProvider()]
+    """The providers AXIOM tries, in order of usefulness.
+
+    SearXNG sits after the direct engines: it aggregates many backends and
+    keeps the chain alive in regions where Brave and DuckDuckGo are blocked.
+    """
+    return [BraveProvider(), DuckDuckGoProvider(), SearXNGProvider(), WikipediaProvider()]
 
 
 class MultiSearchProvider(SearchProvider):
@@ -35,6 +45,11 @@ class MultiSearchProvider(SearchProvider):
 
     #: Ceiling on raw page download, independent of the context trim.
     MAX_DOWNLOAD_CHARS = 3_000_000
+
+    #: Transient-failure retries per provider: a VPN switch kills in-flight
+    #: connections, and a fresh attempt a second later usually succeeds.
+    TRANSIENT_RETRIES = 2
+    TRANSIENT_RETRY_DELAY = 1.0
 
     def __init__(self, providers: list[SearchProvider] | None = None, timeout: float | None = None) -> None:
         self._providers = list(providers) if providers else default_chain()
@@ -62,13 +77,19 @@ class MultiSearchProvider(SearchProvider):
         self.last_provider = ""
         self.last_errors = []
         for provider in self._providers:
-            try:
-                results = await provider.search(query, limit=limit)
-            except SearchUnavailableError as exc:
-                self.last_errors.append(f"{provider.name}: {exc}")
-                continue
-            except Exception as exc:
-                self.last_errors.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+            # Retry transient network errors only (VPN reconnect, DNS hiccup):
+            # a provider that really answers with garbage is not retried.
+            retried = await retry_async(
+                provider.search,
+                kwargs={"query": query, "limit": limit},
+                max_attempts=self.TRANSIENT_RETRIES,
+                base_delay=self.TRANSIENT_RETRY_DELAY,
+                max_delay=self.TRANSIENT_RETRY_DELAY,
+            )
+            if retried.ok:
+                results = retried.value
+            else:
+                self.last_errors.append(f"{provider.name}: {retried.error}")
                 continue
             if results:
                 self.last_provider = provider.name
@@ -87,18 +108,19 @@ class MultiSearchProvider(SearchProvider):
         turned into text, so huge pages cannot blow up memory; the text itself
         is still trimmed to ``max_chars``.
         """
-        last_error: Exception | None = None
         for provider in self._providers:
-            try:
-                text = await provider.fetch(url, max_chars=self.MAX_DOWNLOAD_CHARS)
-            except SearchUnavailableError as exc:
-                last_error = exc
-                continue
-            except Exception as exc:
-                last_error = exc
-                continue
-            return text[:max_chars].rstrip() + "…" if len(text) > max_chars else text
+            retried = await retry_async(
+                provider.fetch,
+                kwargs={"url": url, "max_chars": self.MAX_DOWNLOAD_CHARS},
+                max_attempts=self.TRANSIENT_RETRIES,
+                base_delay=self.TRANSIENT_RETRY_DELAY,
+                max_delay=self.TRANSIENT_RETRY_DELAY,
+            )
+            if retried.ok:
+                text = retried.value
+                return text[:max_chars].rstrip() + "…" if len(text) > max_chars else text
+            self.last_errors.append(f"{provider.name}: {retried.error}")
         raise SearchUnavailableError(
             f"Could not read source: {url}",
-            hint=str(last_error) if last_error else None,
+            hint="; ".join(self.last_errors[:3]) or None,
         )

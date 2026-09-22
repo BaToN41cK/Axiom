@@ -40,6 +40,8 @@ COMMANDS: tuple[Command, ...] = (
     Command("/settings", "Settings"),
     Command("/search", "Web search", "query"),
     Command("/status", "System status"),
+    Command("/permissions", "Permission mode (ask/auto_approve_safe/auto_approve_all)"),
+    Command("/profiles", "List / switch system prompt profiles"),
     Command("/exit", "Exit Axiom"),
 )
 
@@ -82,6 +84,16 @@ def command_rows(commands: list[Command], width: int = 60) -> list[Option]:
     return rows
 
 
+class MenuOptionList(OptionList):
+    """An OptionList that never takes focus.
+
+    The slash menu must not steal focus from the prompt: the menu is
+    navigated by InputBar.on_key while the caret stays in the input.
+    """
+
+    can_focus = False
+
+
 class CommandMenu(Vertical):
     """The ``/`` autocomplete panel — filtered, arrow-navigable, mouse-clickable."""
 
@@ -98,7 +110,8 @@ class CommandMenu(Vertical):
 
     def compose(self):
         yield Static("COMMANDS", id="command-menu-title")
-        yield OptionList(id="command-menu-list")
+        yield MenuOptionList(id="command-menu-list")
+
 
     @property
     def open(self) -> bool:
@@ -114,7 +127,8 @@ class CommandMenu(Vertical):
             return
         token = text.split(" ", 1)[0]
         # once a space is typed the command itself is settled: hide the menu
-        argument_typed = " " in text.strip()
+        # (text, not text.strip() — a trailing space starts the argument too)
+        argument_typed = " " in text
         commands = matching_commands(token)
         if argument_typed:
             self.hide()
@@ -130,6 +144,10 @@ class CommandMenu(Vertical):
         self._visible = True
         self.display = True
         self.refresh(layout=True)
+        # The menu is part of the normal vertical flow, so focus must stay in
+        # the prompt while it is open — do not touch focus here (arrows are
+        # driven by InputBar.on_key, clicks arrive as Chosen messages).
+
 
     def hide(self) -> None:
         if not self._visible:

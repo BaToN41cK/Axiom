@@ -34,3 +34,8 @@ Thumbs.db
 # Local planning notes: never ignore the tracked TODO.md itself.
 # (Untracked TODO copies in subfolders can still be ignored:)
 **/TODO.local.md
+
+# Session files and test artifacts
+.tmp/
+image.png
+desktop/temp-ps.txt

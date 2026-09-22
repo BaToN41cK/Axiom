@@ -154,9 +154,10 @@ kbd {
   min-width: 0;
 }
 .workbench-side {
-  width: 340px;
+  width: var(--side-w, 340px);
   min-width: 0;
   flex-shrink: 0;
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -165,6 +166,23 @@ kbd {
   border-left: 1px solid var(--border-soft);
   transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease;
 }
+/* Drag handle on the left edge of the tools panel (§8: resize panels).
+   The width transition is disabled while dragging so the panel tracks
+   the mouse 1:1 instead of lagging behind it. */
+body.resizing .workbench-side { transition: none; }
+.side-resizer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 6;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.side-resizer:hover,
+.side-resizer:active { background: var(--accent-soft); }
 /* Collapsed: the panel keeps zero width (chat expands automatically); the
    inner content keeps its natural width so it never reflows mid-animation. */
 .workbench.panel-closed .workbench-side {
@@ -211,6 +229,7 @@ kbd {
 .ws-item-text { display: flex; flex-direction: column; min-width: 0; }
 .ws-item-name { font-size: 13px; font-weight: 600; }
 .ws-item-path { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-leave:hover { color: var(--bad); background: rgba(229, 104, 92, 0.14); }
 .ws-open {
   display: flex; align-items: center; gap: 8px; width: 100%;
   margin-top: 6px; padding: 8px; border-radius: var(--radius-sm);
@@ -1508,7 +1527,7 @@ kbd {
 ::-webkit-scrollbar-corner { background: transparent; }
 
 /* Text selection */
-::selection { background: rgba(108, 140, 255, 0.32); color: var(--text); }
+::selection { background: rgba(139, 0, 0, 0.55); color: var(--text); }
 
 /* Ambient accent glow at the top of the main area */
 .main::before {
@@ -1516,14 +1535,19 @@ kbd {
   position: absolute;
   inset: 0 0 auto 0;
   height: 180px;
-  background: radial-gradient(ellipse 60% 100% at 50% 0%, rgba(108, 140, 255, 0.07), transparent 70%);
+  background: radial-gradient(ellipse 60% 100% at 50% 0%, rgba(139, 0, 0, 0.08), transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
 .main > * { position: relative; z-index: 1; }
+/* The top bar hosts the popovers (project selector, model menu). Without this
+   they would be painted *under* `.workbench`, which is later in the DOM and
+   shares z-index 1 — so every menu entry became unclickable. 60 also beats the
+   <=760px overlay variant of the side panel (z-index 40). */
+.main > .topbar { z-index: 60; }
 
 /* Focus ring for keyboard users */
-:focus-visible { outline: 2px solid rgba(108, 140, 255, 0.6); outline-offset: 2px; border-radius: 4px; }
+:focus-visible { outline: 2px solid rgba(190, 60, 60, 0.8); outline-offset: 2px; border-radius: 4px; }
 
 
 /* Inline attachments inside the composer field (paste / drag & drop) */

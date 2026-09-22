@@ -19,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -33,8 +34,9 @@ _EXE_CANDIDATES = ("axiom-desktop.exe", "AXIOM.exe", "axiom.exe", "axiom-desktop
 #: frontend, a debug build has none and needs the Vite dev server.
 _PROFILE_ORDER = ("release", "debug")
 
-#: Used when tauri.conf.json cannot be read.
-_FALLBACK_DEV_URL = "http://localhost:1420"
+#: Used when tauri.conf.json cannot be read. A literal IP survives VPN
+#: adapters flipping ``localhost`` between IPv4 and IPv6.
+_FALLBACK_DEV_URL = "http://127.0.0.1:1420"
 
 #: How long to wait for the dev server to answer, and how often to poll it.
 _DEV_SERVER_WAIT = 30.0
@@ -197,6 +199,77 @@ def _find_built_exe() -> Path | None:
     return _built_exe("debug")
 
 
+def _wait_for_dev_server(desktop: Path, dev_url: str, timeout: float = _DEV_SERVER_WAIT) -> bool:
+    """Poll until the dev server really answers HTTP at ``dev_url``.
+
+    Re-probing both address families and bypassing any system proxy keeps the
+    check honest while a VPN is reconnecting: a half-up VPN often accepts the
+    TCP connection but answers nothing.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _dev_server_answers(dev_url):
+            return True
+        time.sleep(_DEV_SERVER_POLL)
+    return False
+
+
+def _start_dev_server(desktop: Path) -> bool:
+    """Start the Vite dev server detached and wait until it serves HTTP.
+
+    Returns ``True`` when the server is up (either just started or already
+    running). This is what makes a debug Tauri shell usable after a reboot or
+    a VPN change: without it the window loads ``http://127.0.0.1:1420`` and
+    renders ``ERR_CONNECTION_REFUSED``.
+    """
+    npm_cmd = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm_cmd is None:
+        return False
+    dev_url = _dev_url(desktop)
+    if _dev_server_answers(dev_url):
+        return True
+    if not (desktop / "node_modules").exists():
+        return False
+    log = open(desktop / "vite_dev.log", "ab")  # noqa: SIM115 - owned by the child
+    try:
+        subprocess.Popen(
+            [npm_cmd, "run", "dev"],
+            cwd=desktop,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=_DETACHED if _IS_WINDOWS else 0,
+            start_new_session=not _IS_WINDOWS,
+        )
+    except OSError:
+        return False
+    finally:
+        log.close()
+    return _wait_for_dev_server(desktop, dev_url)
+
+
+def _launch_exe(exe: Path) -> bool:
+    """Launch a built exe, starting the Vite dev server first when needed.
+
+    A debug build ships no frontend of its own: the window loads
+    ``build.devUrl``. Launching it without a live dev server only shows
+    ``ERR_CONNECTION_REFUSED``, so the server is started here.
+    """
+    if _is_dev_build(exe):
+        desktop = _desktop_of(exe)
+        if desktop is None or not _start_dev_server(desktop):
+            print(
+                "✕ Отладочная сборка AXIOM требует dev-сервер (Vite), "
+                "но он не запустился.\n"
+                "  Лог: desktop/vite_dev.log\n"
+                "  Запустите вручную: cd desktop && npm run dev",
+                file=sys.stderr,
+            )
+            return False
+    _spawn_detached(exe)
+    return True
+
+
 def _run_dev(desktop: Path) -> int:
     """Start the Tauri dev shell (Vite + Rust build) fully detached.
 
@@ -277,8 +350,8 @@ def main() -> int:
         try:
             # Detached: the GUI keeps running after the terminal is closed,
             # and no inherited pipe pins this process to the console.
-            _spawn_detached(exe)
-            return _EXIT_OK
+            if _launch_exe(exe):
+                return _EXIT_OK
         except FileNotFoundError:
             pass
     for desktop in _desktop_dirs():
@@ -291,8 +364,8 @@ def main() -> int:
                 exe = _find_built_exe_any()
                 if exe is not None:
                     try:
-                        _spawn_detached(exe)
-                        return _EXIT_OK
+                        if _launch_exe(exe):
+                            return _EXIT_OK
                     except FileNotFoundError:
                         pass
             return dev
