@@ -30,6 +30,7 @@ interface Props {
   onProviderSetBaseUrl: (id: string, baseUrl: string) => Promise<void>;
   onProviderDiscover: (id: string) => Promise<void>;
   onProviderPickModel: (providerId: string, model: string) => Promise<void>;
+  onLoadProviders: () => Promise<void>;
 }
 
 const SECTIONS: { key: SettingsSection; label: string; icon: ReactNode }[] = [
@@ -71,12 +72,17 @@ export default function SettingsModal({
   onProviderSetBaseUrl,
   onProviderDiscover,
   onProviderPickModel,
+  onLoadProviders,
 }: Props) {
   const [draft, setDraft] = useState<AxiomConfig>(config);
 
   useEffect(() => {
     setDraft(config);
   }, [config]);
+
+  useEffect(() => {
+    if (section === "providers") void onLoadProviders();
+  }, [section]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -197,9 +203,16 @@ function ProvidersSection({ rows, models, loading, onTest, onSaveKey, onSetBaseU
   onSetBaseUrl: (id: string, baseUrl: string) => Promise<void>;
   onDiscover: (id: string) => Promise<void>; onPickModel: (providerId: string, model: string) => Promise<void>;
 }) {
-  const [selected, setSelected] = useState(rows[0]?.id ?? "openai");
+  const [selected, setSelected] = useState(rows.find((item) => item.id === "openai_compatible")?.id ?? rows[0]?.id ?? "openai_compatible");
   const [key, setKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const row = rows.find((item) => item.id === selected) ?? rows[0];
+  useEffect(() => {
+    if (rows.length && !rows.some((item) => item.id === selected)) {
+      setSelected(rows.find((item) => item.id === "openai_compatible")?.id ?? rows[0].id);
+    }
+  }, [rows, selected]);
+  useEffect(() => setBaseUrl(row?.base_url || ""), [row?.id, row?.base_url]);
   const providerModels = models.filter((item) => item.provider_id === selected);
   return <div className="provider-settings">
     <Row label="Provider" hint="Статус и endpoint берутся из реального ProviderManager">
@@ -211,7 +224,7 @@ function ProvidersSection({ rows, models, loading, onTest, onSaveKey, onSetBaseU
       <input type="password" value={key} placeholder={row?.configured ? "•••••••• (сохранён)" : "не задан"} onChange={(e) => setKey(e.target.value)} />
     </Row>
     <Row label="Base URL" hint="Для OpenAI Compatible укажите endpoint с /v1, например http://localhost:8000/v1">
-      <div className="provider-endpoint"><input value={row?.base_url || ""} placeholder="https://api.example.com/v1" onChange={(e) => { const value = e.target.value; if (row) { row.base_url = value; } }} /><button className="btn ghost" onClick={() => void onSetBaseUrl(selected, row?.base_url || "")}>Сохранить URL</button></div>
+      <div className="provider-endpoint"><input value={baseUrl} placeholder="https://api.example.com/v1" onChange={(e) => setBaseUrl(e.target.value)} /><button className="btn ghost" onClick={() => void onSetBaseUrl(selected, baseUrl)}>Сохранить URL</button></div>
     </Row>
     <div className="settings-actions">
       <button className="btn ghost" disabled={!row || loading} onClick={() => void onSaveKey(selected, key)}>Сохранить ключ</button>

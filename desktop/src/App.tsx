@@ -134,13 +134,13 @@ export default function App() {
           onOpenSettings={() => s.openSettings()}
         />
         {s.settingsOpen && s.config && (
-          <SettingsModal
-            config={s.config}
-            section={s.settingsSection}
-            setSection={s.setSettingsSection}
-            onClose={() => s.setSettingsOpen(false)}
-            onSave={s.saveConfig}
-            onRestartCore={s.restartCore}
+                   <SettingsModal
+           config={s.config}
+           section={s.settingsSection}
+           setSection={s.setSettingsSection}
+           onClose={() => s.setSettingsOpen(false)}
+           onSave={s.saveConfig}
+           onRestartCore={s.restartCore}
            providerRows={s.providerRows}
            providerModels={s.providerModels}
            providerLoading={s.providerLoading}
@@ -149,6 +149,7 @@ export default function App() {
            onProviderSetBaseUrl={s.providerSetBaseUrl}
            onProviderDiscover={s.providerDiscover}
            onProviderPickModel={s.providerPickModel}
+           onLoadProviders={s.loadProviders}
           />
         )}
         {toasts}
@@ -285,22 +286,23 @@ export default function App() {
       </div>
 
       {s.settingsOpen && s.config && (
-        <SettingsModal
-          config={s.config}
-          section={s.settingsSection}
-          setSection={s.setSettingsSection}
-          onClose={() => s.setSettingsOpen(false)}
-          onSave={s.saveConfig}
-          onRestartCore={s.restartCore}
+                 <SettingsModal
+           config={s.config}
+           section={s.settingsSection}
+           setSection={s.setSettingsSection}
+           onClose={() => s.setSettingsOpen(false)}
+           onSave={s.saveConfig}
+           onRestartCore={s.restartCore}
            providerRows={s.providerRows}
            providerModels={s.providerModels}
            providerLoading={s.providerLoading}
            onProviderTest={s.providerTest}
            onProviderSaveKey={s.providerSaveKey}
-           onProviderDiscover={s.providerDiscover}
            onProviderSetBaseUrl={s.providerSetBaseUrl}
+           onProviderDiscover={s.providerDiscover}
            onProviderPickModel={s.providerPickModel}
-        />
+           onLoadProviders={s.loadProviders}
+         />
       )}
 
       <OverlayPanel

@@ -129,8 +129,11 @@ class ProviderManager:
             prov = AnthropicProvider(key, base_url=url or "https://api.anthropic.com")
         else:
             known = find_known(pid)
-            prov = OpenAICompatibleProvider(pid, known.label if known else pid,
-                                            url or "https://api.openai.com/v1", key)
+            prov = OpenAICompatibleProvider(
+                pid, known.label if known else pid,
+                url or ("" if pid == "openai_compatible" else "https://api.openai.com/v1"),
+                key,
+            )
         self._providers[pid] = prov
         return prov
 
