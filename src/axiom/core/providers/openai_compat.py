@@ -29,6 +29,10 @@ class OpenAICompatibleProvider(Provider):
         self.extra_headers = extra_headers or {}
         self.timeout = timeout
 
+    def _error_detail(self, response: httpx.Response) -> str:
+        body = response.text.strip().replace("\n", " ")[:500]
+        return f"HTTP {response.status_code}" + (f": {body}" if body else "")
+
     async def authenticate(self) -> ProviderStatus:
         if not self.api_key:
             return ProviderStatus.NOT_CONFIGURED
@@ -48,9 +52,9 @@ class OpenAICompatibleProvider(Provider):
             async with httpx.AsyncClient(timeout=20.0) as c:
                 r = await c.get(f"{self.base_url}/models", headers=headers(self.api_key, self.extra_headers))
             if r.status_code == 401:
-                raise ProviderAuthError(f"{self.label}: invalid API key")
+                raise ProviderAuthError(f"{self.label}: invalid API key ({self._error_detail(r)})")
             if r.status_code >= 400:
-                raise ProviderError(f"{self.label}: HTTP {r.status_code}")
+                raise ProviderError(f"{self.label}: {self._error_detail(r)}")
             data = r.json()
             items = data.get("data", []) if isinstance(data, dict) else []
             out: list[ModelProfile] = []
@@ -105,11 +109,14 @@ class OpenAICompatibleProvider(Provider):
                               json=payload) as resp,
             ):
                     if resp.status_code == 401:
-                        raise ProviderAuthError(f"{self.label}: invalid API key")
+                        body = (await resp.aread())[:500].decode("utf-8", errors="replace")
+                        raise ProviderAuthError(
+                            f"{self.label}: invalid API key (HTTP 401: {body})"
+                        )
                     if resp.status_code == 429:
                         raise ProviderUnavailableError(f"{self.label}: rate limited (429)")
                     if resp.status_code >= 400:
-                        body = (await resp.aread())[:400].decode("utf-8", errors="replace")
+                        body = (await resp.aread())[:500].decode("utf-8", errors="replace")
                         raise ProviderError(f"{self.label}: HTTP {resp.status_code}: {body}")
                     calls: dict[int, ToolCall] = {}
                     async for line in resp.aiter_lines():

@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 
+import httpx
+
 from axiom.core.agents import AgentProfile, AgentRegistry
-from axiom.core.providers.base import ModelProfile, Provider, ProviderStatus, StreamChunk
+from axiom.core.providers.base import ModelProfile, Provider, ProviderAuthError, ProviderStatus, StreamChunk
 from axiom.core.providers.catalog import ModelCatalog
 from axiom.core.providers.known import known_provider_ids
 from axiom.core.providers.manager import ProviderManager
+from axiom.core.providers.openai_compat import OpenAICompatibleProvider
 from axiom.core.providers.runtime import ProviderChatClient
 from axiom.core.router import ModelRouter, RouteTarget
 from axiom.core.tools.meta import category_of, resolve_tools_for_task, tools_for_agent
@@ -27,6 +30,51 @@ def test_provider_has_unified_interface():
                  "capabilities"):
         assert hasattr(Provider, name), name
 
+
+async def test_openai_compatible_sends_bearer_and_reports_mixen_response(monkeypatch):
+
+    seen = {}
+
+    class Response:
+        status_code = 401
+        text = '{"error":{"message":"invalid token"}}'
+
+    class StreamResponse:
+        status_code = 401
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def aread(self):
+            return b'{"error":{"message":"invalid streaming token"}}'
+
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def get(self, url, headers=None):
+            seen.update(url=url, headers=headers)
+            return Response()
+        def stream(self, *args, **kwargs):
+            return StreamResponse()
+        async def post(self, *args, **kwargs):
+            return StreamResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: Client())
+    provider = OpenAICompatibleProvider("openai_compatible", "OpenAI Compatible", "https://api.mixen.ai/v1", "mxn-test")
+    try:
+        await provider.list_models()
+    except ProviderAuthError as exc:
+        assert "HTTP 401" in str(exc)
+        assert "invalid token" in str(exc)
+    else:
+        raise AssertionError("expected ProviderAuthError")
+    assert seen["url"] == "https://api.mixen.ai/v1/models"
+    assert seen["headers"]["Authorization"] == "Bearer mxn-test"
+    try:
+        [chunk async for chunk in provider.stream("gpt-5.6-sol", [])]
+    except ProviderAuthError as exc:
+        assert "invalid streaming token" in str(exc)
+    else:
+        raise AssertionError("expected streaming ProviderAuthError")
+
 async def test_manager_no_key_returns_empty_and_not_configured(tmp_path, monkeypatch):
     monkeypatch.setenv("AXIOM_HOME", str(tmp_path))
     for var in ("DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
@@ -34,6 +82,7 @@ async def test_manager_no_key_returns_empty_and_not_configured(tmp_path, monkeyp
     mgr = ProviderManager()
     assert await mgr.get_provider("deepseek").authenticate() == ProviderStatus.NOT_CONFIGURED
     assert await mgr.discover_models("deepseek") == []
+
 
 def test_model_profile_capabilities():
     m = ModelProfile(id="glm-4.6", provider_id="zai", coding=True, reasoning=True, tool_calling=True)
