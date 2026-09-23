@@ -79,6 +79,18 @@ export interface Conversation {
   updatedAt: number;
   messageCount: number;
   messages?: StoredMessage[];
+  /** Sidebar: pinned to the top of the list. */
+  pinned?: boolean;
+  /** Sidebar: filed under this folder (null = no folder). */
+  folder?: string | null;
+}
+
+/** One full-text search hit over stored message content. */
+export interface ChatHit {
+  id: string;
+  title: string;
+  snippet: string;
+  updated_at: number;
 }
 
 export interface StoredMessage {
@@ -125,6 +137,11 @@ export interface AxiomConfig {
   auto_scroll: boolean;
   show_metrics: boolean;
   show_context: boolean;
+  permission_mode: "ask" | "auto_approve_safe" | "auto_approve_all";
+  router_enabled: boolean;
+  router_budget: "performance" | "balanced" | "economy";
+  router_primary: { provider_id: string; model: string } | null;
+  router_fallbacks: { provider_id: string; model: string }[];
 }
 
 export interface SourceItem {
@@ -182,6 +199,10 @@ export interface LiveMessage {
   createdAt: number;
   /** Base64 images attached by the user (vision models). */
   images?: string[];
+  /** Regenerated alternates of this answer (branch history, newest last). */
+  alternates?: string[];
+  /** Which branch is displayed (index into alternates, or -1 = current). */
+  branchIndex?: number;
 }
 
 export interface HealthReport {
@@ -210,6 +231,45 @@ export interface StatusReport {
   historyCount: number;
   configPath: string;
   busy: boolean;
+}
+
+export interface ProviderRow {
+  id: string;
+  label: string;
+  base_url: string;
+  configured: boolean;
+  status: string;
+}
+
+export interface ProviderModelRow {
+  id: string;
+  model: string;
+  provider_id: string;
+  label: string;
+  capabilities: string[];
+  context_length: number | null;
+}
+
+export interface AgentRow {
+  id: string;
+  label: string;
+  provider_id: string;
+  model: string;
+  tools: string[];
+}
+
+export interface TrajectoryEventRow {
+  seq: number;
+  time: string;
+  actor: string;
+  kind: string;
+  summary: string;
+}
+
+export interface TrajectoryViewer {
+  run_id: string;
+  lines: TrajectoryEventRow[];
+  usage: Record<string, number>;
 }
 
 export interface ToolInfo {

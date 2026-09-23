@@ -554,3 +554,350 @@ class StatusPanel(PanelScreen):
                 with Horizontal(classes="status-row"):
                     yield Static(key, classes="status-key", markup=False)
                     yield Static(value, classes="status-value", markup=False)
+class TrajectoryPanel(PanelScreen):
+    """``/trajectory`` — Trajectory Viewer (п.11/14): timeline шагов запуска."""
+
+    title_text = "TRAJECTORY"
+
+    def __init__(self, viewer: dict) -> None:
+        super().__init__()
+        self._viewer = dict(viewer or {})
+        self._lines: list[dict] = list(self._viewer.get("lines") or [])
+
+    def keys_hint(self) -> str:
+        return "↑↓ navigate   ·   enter details   ·   esc close"
+
+    def subtitle_lines(self) -> list[str]:
+        usage = self._viewer.get("usage") or {}
+        run_id = self._viewer.get("run_id") or "?"
+        return [
+            f"RUN #{run_id}   ·   {len(self._lines)} step(s)",
+            (
+                f"in {usage.get('input_tokens', 0)}"
+                f"  out {usage.get('output_tokens', 0)}"
+                f"  reasoning {usage.get('reasoning_tokens', 0)}"
+                f"  ·   ${usage.get('cost_usd', 0):.4f}"
+                f"  ·   {usage.get('latency_ms', 0)} ms"
+            ),
+        ]
+
+    def body(self) -> ComposeResult:
+        if not self._lines:
+            yield Static("No steps recorded yet — send a message first.", markup=False)
+            return
+        rows = [
+            Option(
+                f"{line.get('time', '--:--:--')}  "
+                f"{line.get('actor', '')!s:<12.12}  "
+                f"{line.get('kind', '')!s:<20.20}  "
+                f"{str(line.get('summary', ''))[:56]}",
+                id=str(line.get("seq", "")),
+            )
+            for line in self._lines
+        ]
+        yield OptionList(*rows, id="trajectory-list")
+
+    def on_mount(self) -> None:
+        if self._lines:
+            self.query_one("#trajectory-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if event.option.id:
+            self.dismiss(str(event.option.id))
+
+
+def format_trajectory_detail(detail: dict | None) -> str:
+    """Раскрытие одного шага (п.14-15): данные шага человекочитаемым блоком."""
+    if not detail:
+        return "No details for this step."
+    import json as _json
+
+    lines = [
+        f"seq      {detail.get('seq')}",
+        f"kind     {detail.get('kind')}",
+        f"actor    {detail.get('actor')}",
+        f"summary  {detail.get('summary')}",
+    ]
+    data = detail.get("data") or {}
+    if data:
+        try:
+            body = _json.dumps(data, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            body = str(data)
+        if len(body) > 4000:
+            body = body[:4000] + "\n… truncated"
+        lines.append("data")
+        lines.append(body)
+    return "\n".join(lines)
+
+
+class TrajectoryDetailPanel(PanelScreen):
+    """Детали одного шага Trajectory (Enter в /trajectory)."""
+
+    def __init__(self, detail: dict | None) -> None:
+        super().__init__()
+        self._detail = detail
+        kind = str((detail or {}).get("kind") or "step")
+        self.title_text = f"STEP · {kind.upper()}"
+
+    def keys_hint(self) -> str:
+        return "esc close"
+
+    def body(self) -> ComposeResult:
+        yield Static(format_trajectory_detail(self._detail), markup=False)
+
+
+class ProvidersPanel(PanelScreen):
+    """``/providers`` — Provider Manager (п.2): статусы, Enter = Test."""
+
+    title_text = "PROVIDERS"
+
+    def __init__(
+        self,
+        rows: list[dict],
+        *,
+        on_test: Callable[[str], Awaitable[str]] | None = None,
+        on_set_key: Callable[[str, str], Awaitable[str]] | None = None,
+        on_discover: Callable[[str], Awaitable[list[dict]]] | None = None,
+        on_pick_model: Callable[[str, str], Awaitable[str]] | None = None,
+    ) -> None:
+        super().__init__()
+        self._rows = [dict(row) for row in rows]
+        self._on_test = on_test
+        self._on_set_key = on_set_key
+        self._on_discover = on_discover
+        self._on_pick_model = on_pick_model
+        self._models: list[dict] = []
+
+    def keys_hint(self) -> str:
+        return "↑↓ select   ·   enter test   ·   tab key field   ·   esc close"
+
+    def subtitle_lines(self) -> list[str]:
+        configured = sum(1 for row in self._rows if row.get("configured"))
+        return [f"{configured}/{len(self._rows)} provider(s) configured"]
+
+    @staticmethod
+    def _row_text(row: dict) -> str:
+        status = str(row.get("status") or "unknown")
+        if status == "connected":
+            glyph = theme.TICK
+        elif status == "error":
+            glyph = theme.CROSS
+        else:
+            glyph = theme.BULLET
+        label = str(row.get("label") or row.get("id") or "")
+        return (
+            f"{glyph} {label:<18.18}  {status:<16.16}  "
+            f"{row.get('base_url') or ''!s}"
+        )
+
+    def body(self) -> ComposeResult:
+        rows = [
+            Option(self._row_text(row), id=str(row.get("id") or ""))
+            for row in self._rows
+        ]
+        yield Static("Providers — Enter tests the highlighted one.", markup=False)
+        yield OptionList(*rows, id="providers-list")
+        yield Static("API key for the selected provider (stored locally, never shown):", markup=False)
+        yield Input(password=True, placeholder="paste API key…", id="provider-key")
+        with Horizontal(classes="provider-actions"):
+            yield Button("Save key & test", id="provider-save")
+            yield Button("Discover models", id="provider-discover")
+        yield Static("Models reported by the provider API:", markup=False)
+        yield OptionList(id="provider-models")
+
+    def on_mount(self) -> None:
+        if self._rows:
+            self.query_one("#providers-list", OptionList).focus()
+
+    def _highlighted_id(self) -> str:
+        option_list = self.query_one("#providers-list", OptionList)
+        index = option_list.highlighted
+        if index is not None and 0 <= index < len(self._rows):
+            return str(self._rows[index].get("id") or "")
+        return ""
+
+    def _refresh_rows(self) -> None:
+        option_list = self.query_one("#providers-list", OptionList)
+        option_list.clear_options()
+        for row in self._rows:
+            option_list.add_option(Option(self._row_text(row), id=str(row.get("id") or "")))
+
+    def _set_status(self, provider_id: str, status: str) -> None:
+        for row in self._rows:
+            if str(row.get("id")) == provider_id:
+                row["status"] = status
+                row["configured"] = status != "not_configured"
+                break
+        self._refresh_rows()
+
+    async def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        if str(getattr(event.option_list, "id", "")) == "provider-models":
+            await self._pick_model(str(event.option.id or ""))
+            return
+        provider_id = str(event.option.id or "")
+        if not provider_id or self._on_test is None:
+            return
+        if self.app is not None:
+            self.app.notify(f"Testing {provider_id}…", title="Providers", timeout=3)
+        self.run_worker(self._test(provider_id), group="provider-test")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "provider-save":
+            self.run_worker(self._save_key(), group="provider-key")
+        elif event.button.id == "provider-discover":
+            self.run_worker(self._discover(), group="provider-discover")
+
+    async def _save_key(self) -> None:
+        key = self.query_one("#provider-key", Input).value.strip()
+        provider_id = self._highlighted_id()
+        if not key or not provider_id or self._on_set_key is None:
+            if self.app is not None:
+                self.app.notify("Select a provider and paste its API key.", severity="warning", timeout=4)
+            return
+        self.query_one("#provider-key", Input).value = ""
+        try:
+            status = str(await self._on_set_key(provider_id, key))
+        except Exception as exc:
+            status = f"error: {exc}"
+        self._set_status(provider_id, status)
+        if self.app is not None:
+            self.app.notify(f"{provider_id}: {status}", title="Providers", timeout=5)
+        if status == "connected":
+            await self._discover()
+
+    async def _discover(self) -> None:
+        provider_id = self._highlighted_id()
+        if not provider_id or self._on_discover is None:
+            return
+        try:
+            self._models = list(await self._on_discover(provider_id))
+        except Exception as exc:
+            self._models = []
+            if self.app is not None:
+                self.app.notify(f"{provider_id}: {exc}", title="Providers", timeout=5)
+        targets = self.query_one("#provider-models", OptionList)
+        targets.clear_options()
+        for model in self._models:
+            caps = ", ".join(model.get("capabilities") or []) or "no capabilities reported"
+            targets.add_option(
+                Option(f"{model.get('label')}  [{caps}]", id=str(model.get("id") or ""))
+            )
+        if self.app is not None:
+            self.app.notify(f"{provider_id}: {len(self._models)} model(s)", title="Providers", timeout=4)
+
+    async def _pick_model(self, route_id: str) -> None:
+        model_row = next((m for m in self._models if str(m.get("id")) == route_id), None)
+        if model_row is None or self._on_pick_model is None:
+            return
+        try:
+            message = str(
+                await self._on_pick_model(
+                    str(model_row.get("provider_id")), str(model_row.get("model"))
+                )
+            )
+        except Exception as exc:
+            message = f"error: {exc}"
+        if self.app is not None:
+            self.app.notify(message, title="Providers", timeout=5)
+
+    async def _test(self, provider_id: str) -> None:
+        try:
+            assert self._on_test is not None
+            status = str(await self._on_test(provider_id))
+        except Exception as exc:
+            status = f"error: {exc}"
+        self._set_status(provider_id, status)
+        if self.app is not None:
+            self.app.notify(f"{provider_id}: {status}", title="Providers", timeout=5)
+
+
+class AgentsPanel(PanelScreen):
+    """``/agents`` — Agent Registry (п.5/7): роли и назначенные им модели."""
+
+    title_text = "AGENTS"
+
+    def __init__(self, rows: list[dict]) -> None:
+        super().__init__()
+        self._rows = [dict(row) for row in rows]
+
+    def keys_hint(self) -> str:
+        return "↑↓ scroll   ·   esc close"
+
+    def subtitle_lines(self) -> list[str]:
+        return [f"{len(self._rows)} agent(s) registered"]
+
+    @staticmethod
+    def _row_text(row: dict) -> str:
+        target = str(row.get("model") or "(session default)")
+        provider = str(row.get("provider_id") or "")
+        tools = ", ".join(row.get("tools") or []) or "(auto by task)"
+        return (
+            f"{row.get('label') or row.get('id')!s:<14.14}  {provider}/{target}\n"
+            f"    tools: {tools}"
+        )
+
+    def body(self) -> ComposeResult:
+        rows = [
+            Option(self._row_text(row), id=str(row.get("id") or ""), disabled=True)
+            for row in self._rows
+        ]
+        yield OptionList(*rows, id="agents-list")
+
+
+class PermissionsPanel(PanelScreen):
+    """``/permissions`` — выбор реального режима разрешений (п.23)."""
+
+    title_text = "PERMISSIONS"
+
+    #: (value, label, hint) — the real PermissionMode values, in order.
+    MODES: tuple[tuple[str, str, str], ...] = (
+        ("ask", "Ask", "Every tool execution needs confirmation"),
+        ("auto_approve_safe", "Auto-approve safe", "Safe tools run, risky ones ask"),
+        ("auto_approve_all", "Auto-approve all", "Everything runs without confirmation"),
+    )
+
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self._current = current
+
+    def keys_hint(self) -> str:
+        return "↑↓ select   ·   enter apply   ·   esc close"
+
+    def subtitle_lines(self) -> list[str]:
+        return [f"Active mode: {self._current}"]
+
+    def body(self) -> ComposeResult:
+        rows = [
+            Option(
+                f"{theme.ARROW if value == self._current else ' '} {label:<20.20}  {hint}",
+                id=value,
+            )
+            for value, label, hint in self.MODES
+        ]
+        yield OptionList(*rows, id="permissions-list")
+
+    def on_mount(self) -> None:
+        self.query_one("#permissions-list", OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        value = str(event.option.id or "")
+        if value:
+            self.dismiss(value)
+
+
+def agent_rows(agents: list) -> list[dict]:
+    """Строки Agent Registry: роль + реально назначенная ей модель из профиля."""
+    rows: list[dict] = []
+    for agent in agents:
+        rows.append({
+            "id": getattr(agent, "id", ""),
+            "label": agent.name() if hasattr(agent, "name") else getattr(agent, "id", ""),
+            "provider_id": getattr(agent, "provider_id", "") or "",
+            "model": getattr(agent, "model", "") or "",
+            "tools": list(getattr(agent, "tools", []) or []),
+        })
+    return rows

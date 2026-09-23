@@ -9,7 +9,8 @@ changes — frontends render :class:`~axiom.core.events.ToolCallEvent` and
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from copy import copy, deepcopy
 
 from axiom.core.errors import AxiomError
 from axiom.core.tools.base import (
@@ -42,10 +43,41 @@ class ToolRegistry:
 
     def unregister(self, name: str) -> None:
         self._tools.pop(name, None)
+        self.classifier.pop(name, None)
 
     def get(self, name: str) -> ToolDefinition | None:
         entry = self._tools.get(name)
         return entry[0] if entry else None
+
+    def subset(self, names: Iterable[str]) -> ToolRegistry:
+        """Return an independent registry containing only the requested tools."""
+        selected = ToolRegistry()
+        cloned_owners: dict[int, object] = {}
+
+        def _clone_bound_callable(callback):
+            owner = getattr(callback, "__self__", None)
+            function = getattr(callback, "__func__", None)
+            if owner is None or function is None:
+                return callback
+            owner_id = id(owner)
+            if owner_id not in cloned_owners:
+                cloned_owners[owner_id] = copy(owner)
+            return getattr(cloned_owners[owner_id], function.__name__)
+
+        for name in names:
+            entry = self._tools.get(name)
+            if entry is None:
+                continue
+            # Bound tool handlers/classifiers often read mutable owner state
+            # such as a workspace root. Clone each owner once so a request
+            # cannot observe another request changing its tool context mid-run.
+            handler = _clone_bound_callable(entry[1])
+            classifier = self.classifier.get(name)
+            selected.register(
+                deepcopy(entry[0]), handler,
+                permission_for=_clone_bound_callable(classifier) if classifier else None,
+            )
+        return selected
 
     @property
     def names(self) -> list[str]:
@@ -66,9 +98,13 @@ class ToolRegistry:
         """Tool schemas for the Ollama ``tools`` parameter."""
         return [d.schema() for d in self.definitions()]
 
-    async def execute(self, name: str, arguments: dict | None = None) -> ToolResult:
+    async def execute(
+        self, name: str, arguments: dict | None = None, *, approved: bool = False
+    ) -> ToolResult:
         """Execute a tool by name, enforcing its permission.
 
+        ``approved`` is reserved for callers that have already obtained an
+        explicit permission decision; normal tool calls remain classifier-gated.
         A model can never force execution of a ``NEVER`` tool, and unknown
         tools fail with a structured result instead of raising.
         """
@@ -80,7 +116,8 @@ class ToolRegistry:
         if definition.permission is ToolPermission.NEVER:
             return ToolResult(name=name, ok=False, error=f"Tool '{name}' is disabled")
         classifier = self.classifier.get(name)
-        if classifier is not None and classifier(name, arguments or {}) is ToolPermission.ASK:
+        if (not approved and classifier is not None
+                and classifier(name, arguments or {}) is ToolPermission.ASK):
             return ToolResult(
                 name=name,
                 ok=False,

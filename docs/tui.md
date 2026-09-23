@@ -89,6 +89,11 @@ Starting AXIOM …
 | `/settings` | настройки (сохраняются сразу) |
 | `/search <query>` | отправить сообщение с принудительным web search |
 | `/status` | статус: сервер, модель, capabilities, метрики последней генерации |
+| `/permissions` | панель режима разрешений; Enter применяет `ask` / `auto_approve_safe` / `auto_approve_all` |
+| `/profiles` | профили системного промпта: Enter — применить выбранный |
+| `/trajectory` | Trajectory Viewer: RUN id, шаги с временем, usage; Enter — детали шага |
+| `/providers` | Provider Manager: статусы, Enter — Test, ввод API-ключа (скрытый) → Save key & test, Discover models → выбор модели |
+| `/agents` | Agent Registry: роли, провайдер/модель, набор инструментов |
 | `/exit` | выход |
 
 В панелях работает навигация стрелками, выбор — `Enter`, закрытие — `Esc`.

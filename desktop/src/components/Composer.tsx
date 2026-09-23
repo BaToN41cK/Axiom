@@ -67,7 +67,7 @@ export default function Composer(props: Props) {
 
   const commands = useMemo<SlashCommand[]>(() => {
     const trimmed = draft.trim();
-    if (!trimmed.startsWith("/") || trimmed.includes(" ")) return [];
+    if (!trimmed.startsWith("/")) return [];
     return matchingCommands(trimmed);
   }, [draft]);
 
@@ -125,7 +125,7 @@ export default function Composer(props: Props) {
   };
 
   const acceptCommand = (command: SlashCommand) => {
-    const needsArgument = command.name === "/search" || command.name === "/model";
+    const needsArgument = command.argumentHint != null;
     onDraftChange(`${command.name} `);
     setPaletteOpen(false);
     if (!needsArgument) {

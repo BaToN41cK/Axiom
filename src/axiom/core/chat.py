@@ -15,9 +15,16 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Only for static typing: the bridge owns the interactive GUI shell
+    # lifecycle, and a runtime import here would be unused in the core.
+    from axiom.core.tools.shell import ShellSession
+
 
 from axiom.core.agent import Agent
 from axiom.core.config import Config
@@ -32,8 +39,11 @@ from axiom.core.events import (
     Message,
     ReasoningChunk,
     StatusChange,
+    ToolCallEvent,
+    ToolResultEvent,
 )
 from axiom.core.history import Conversation, HistoryStore
+from axiom.core.mentions import expand_mentions
 from axiom.core.models import ModelInfo, ModelRegistry
 from axiom.core.ollama import OllamaClient
 from axiom.core.profiles import ProfileManager
@@ -157,8 +167,301 @@ class ChatSession:
         self.active_model: ModelInfo | None = None
         self.last_metrics: dict = {}
         self._task: asyncio.Task | None = None
+        #: Fire-and-forget background model warm-up task. Created by the
+        #: desktop bridge (``startup`` / ``set_model`` / ``warmup``); the
+        #: session only keeps a reference so it can be awaited/cancelled.
+        self.core_warmup_task: asyncio.Task[None] | None = None
+        #: Interactive shell session owned by the GUI terminal panel
+        #: (managed entirely by the desktop bridge; None in TUI/CLI).
+        self.gui_shell: ShellSession | None = None
         #: Profile manager — system prompt profiles
         self.profiles = ProfileManager()
+        # --- Harness (п.1-5): провайдеры, каталог моделей, агенты ---
+        from axiom.core.agents import AgentRegistry
+        from axiom.core.providers.catalog import ModelCatalog
+        from axiom.core.providers.manager import ProviderManager
+
+        self.provider_manager = ProviderManager()
+        self.model_catalog = ModelCatalog()
+        self.agent_registry = AgentRegistry()
+        # --- Harness (п.6-13): bus, trajectory, orchestrator, context, verify ---
+        from axiom.core.bus import EventBus
+        from axiom.core.context_engine import ContextEngine
+        from axiom.core.mcp import MCPManager
+        from axiom.core.orchestrator import Orchestrator
+        from axiom.core.parallel import run_parallel as _parallel_runner
+        from axiom.core.plugins import PluginRegistry
+        from axiom.core.presets import PresetStore, detect_mode
+        from axiom.core.project_index import ProjectMemory
+        from axiom.core.router import ModelRouter, RouterConfig
+        from axiom.core.sandbox import Sandbox
+        from axiom.core.skills import SkillRegistry
+        from axiom.core.trajectory import Trajectory
+        from axiom.core.trajectory_store import TrajectoryStore
+        from axiom.core.verify import VerificationLoop
+
+        self.bus = EventBus()
+        self.trajectory = Trajectory(actor="orchestrator")
+        self.trajectory_store = TrajectoryStore()
+        self.orchestrator = Orchestrator(agents=self.agent_registry, bus=self.bus)
+        self.context_engine = ContextEngine()
+        self.verifier = VerificationLoop()
+        self.sandbox = Sandbox()
+        from axiom.core.permissions import PermissionManager
+
+        self.permissions = PermissionManager(config=self.config)
+        self._active_preset_skills: set[str] = set()
+        self._loaded_plugin_skills: dict[str, set[str]] = {}
+        # --- Harness (п.14-22): skills, router, mcp, plugins, presets ---
+        self.skills = SkillRegistry()
+        self.router = ModelRouter(RouterConfig())
+        self._configure_router_from_config()
+        self.mcp = MCPManager()
+        self.plugins = PluginRegistry()
+        self.presets = PresetStore()
+        self._parallel_runner = _parallel_runner
+        self._detect_mode = detect_mode
+        self._project_memory = None
+        self._verifying = False
+        self._checkpoint = None
+        self._checkpointed = False
+        #: Runtime mode (п.33-34) — ``code-agent`` включает PTC-исполнение.
+        self._mode = "chat"
+        self._code_mode = False
+        try:
+            from pathlib import Path as _Path
+
+            root = self.config.workspace_root
+            if root:
+                self._project_memory = ProjectMemory(_Path(root).expanduser())
+        except Exception:
+            self._project_memory = None
+        self.agent.attach_harness(bus=self.bus, trajectory=self.trajectory,
+                                  router=self.router, catalog=self.model_catalog,
+                                  sandbox=self.sandbox, skills=self.skills,
+                                  verifier=self.verifier)
+        # All providers expose the same normalized stream to Agent.  Ollama
+        # remains the default, while a configured router_primary selects the
+        # external provider for the real chat path.
+        from axiom.core.providers.runtime import ProviderChatClient
+
+        self.provider_client = ProviderChatClient(
+            self.provider_manager, self.router,
+            default_provider="ollama", default_model=self.config.model,
+            ollama_client=self.client,
+        )
+        self.agent._client = self.provider_client
+
+    def _configure_router_from_config(self) -> None:
+        """Собрать RouterConfig из Config (п.16-17): primary + fallback chain."""
+        from axiom.core.router import RouteTarget
+
+        raw = getattr(self.config, "router_primary", None)
+        primary = None
+        if isinstance(raw, dict) and raw.get("provider_id") and raw.get("model"):
+            primary = RouteTarget(str(raw["provider_id"]), str(raw["model"]), "configured")
+        chain: list[RouteTarget] = []
+        for item in getattr(self.config, "router_fallbacks", None) or []:
+            if isinstance(item, dict) and item.get("provider_id") and item.get("model"):
+                chain.append(RouteTarget(str(item["provider_id"]), str(item["model"]), "fallback"))
+        self.router.config.primary = primary
+        self.router.config.fallbacks = chain
+        self.router.config.enabled = bool(getattr(self.config, "router_enabled", True))
+        self.router.config.budget = str(getattr(self.config, "router_budget", "balanced"))
+
+    async def _load_mcp_servers(self) -> list[str]:
+        """Зарегистрировать MCP-тулы из ``Config.mcp_servers`` (п.15)."""
+        entries = getattr(self.config, "mcp_servers", None) or []
+        if not entries:
+            return []
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            command = item.get("command")
+            if name and isinstance(command, list) and command:
+                self.mcp.add_server(name, [str(c) for c in command])
+        return await self.mcp.register_all(self.tools)
+
+    # ------------------------------------------------------ harness (п.20-22)
+
+    def load_plugins(self) -> list[str]:
+        """Подхватить установленные плагины (п.20) и применить их вклады.
+
+        Manifest описывает tools/providers/skills; ядро применяет только то,
+        что реально существует, — неизвестные имена молча игнорируются.
+        """
+        from axiom.core.config import axiom_home
+
+        try:
+            self.plugins.load(axiom_home() / "plugins.json")
+        except Exception:
+            return []
+        names: list[str] = []
+        manifests = self.plugins.list()
+        for plugin_name, skill_ids in self._loaded_plugin_skills.items():
+            for skill_id in skill_ids:
+                self.skills.unpin(skill_id, source=f"plugin:{plugin_name}")
+        self._loaded_plugin_skills.clear()
+        for manifest in manifests:
+            names.append(manifest.name)
+            skill_ids = {str(skill_id) for skill_id in manifest.skills}
+            self._loaded_plugin_skills[manifest.name] = skill_ids
+            for skill_id in skill_ids:
+                self.skills.pin(skill_id, source=f"plugin:{manifest.name}")
+        if names:
+            self.trajectory.append("plugin.load", ", ".join(names), actor="system",
+                                   data={"plugins": names})
+        return names
+
+    def install_plugin(self, manifest) -> None:
+        """Установить плагин и сохранить реестр (п.20)."""
+        from axiom.core.config import axiom_home
+
+        previous = self.plugins.get(manifest.name)
+        self.plugins.install(manifest)
+        try:
+            self.plugins.save(axiom_home() / "plugins.json")
+        except Exception:
+            pass
+        source = f"plugin:{manifest.name}"
+        if previous is not None:
+            for skill_id in previous.skills:
+                self.skills.unpin(str(skill_id), source=source)
+        skill_ids = {str(skill_id) for skill_id in (getattr(manifest, "skills", ()) or ())}
+        self._loaded_plugin_skills[manifest.name] = skill_ids
+        for skill_id in skill_ids:
+            self.skills.pin(skill_id, source=source)
+
+    def remove_plugin(self, name: str) -> bool:
+        """Remove an installed plugin and only the pins owned by that plugin."""
+        removed = self.plugins.remove(name)
+        if not removed:
+            return False
+        for skill_id in self._loaded_plugin_skills.pop(name, set()):
+            self.skills.unpin(skill_id, source=f"plugin:{name}")
+        try:
+            from axiom.core.config import axiom_home
+
+            self.plugins.save(axiom_home() / "plugins.json")
+        except Exception:
+            pass
+        return True
+
+    def apply_preset(self, name: str) -> dict:
+        """Apply runtime-supported preset fields; explicitly report ignored ones."""
+        preset = self.presets.get(name)
+        if preset is None:
+            return {"ok": False, "error": f"unknown preset: {name}"}
+        applied: dict = {"ok": True, "preset": preset.name}
+        unsupported: list[str] = []
+        if preset.temperature is not None:
+            self.config.temperature = preset.temperature
+            applied["temperature"] = preset.temperature
+        if preset.permission in {"ask", "auto_approve_safe", "auto_approve_all"}:
+            self.config.permission_mode = preset.permission
+            applied["permission"] = preset.permission
+        elif preset.permission:
+            unsupported.append("permission")
+        if preset.budget in {"performance", "balanced", "economy"}:
+            self.router.config.budget = preset.budget
+            applied["budget"] = preset.budget
+        elif preset.budget:
+            unsupported.append("budget")
+        if preset.reasoning in {"low", "medium", "high", "max"}:
+            self.config.think = preset.reasoning
+            applied["reasoning"] = preset.reasoning
+        elif preset.reasoning:
+            unsupported.append("reasoning")
+        if preset.context_tokens is not None and 512 <= preset.context_tokens <= 131072:
+            self.config.num_ctx = preset.context_tokens
+            applied["context_tokens"] = preset.context_tokens
+        elif preset.context_tokens is not None:
+            unsupported.append("context_tokens")
+        for skill_id in self._active_preset_skills:
+            self.skills.unpin(skill_id, source="preset")
+        self._active_preset_skills = {str(skill_id) for skill_id in preset.skills}
+        for skill_id in self._active_preset_skills:
+            self.skills.pin(skill_id, source="preset")
+        if preset.skills:
+            applied["skills"] = sorted(self._active_preset_skills)
+        if preset.code_mode:
+            self.set_mode("code-agent")
+            applied["mode"] = "code-agent"
+        unsupported.extend(field for field, value in (
+            ("provider_id", preset.provider_id if preset.provider_id != "ollama" else ""),
+            ("model", preset.model), ("tools", preset.tools), ("fallbacks", preset.fallbacks),
+        ) if value)
+        if unsupported:
+            applied["unsupported"] = sorted(set(unsupported))
+        self.trajectory.append("preset.apply", preset.name, actor="system", data=applied)
+        return applied
+
+    def set_mode(self, mode: str) -> dict:
+        """Переключить runtime-режим (п.33-34); ``code-agent`` включает PTC."""
+        from axiom.core.presets import MODES
+
+        if mode not in MODES:
+            return {"ok": False, "error": f"unknown mode: {mode}"}
+        self._mode = mode
+        self._code_mode = bool(MODES[mode].get("code_mode"))
+        info = {"ok": True, "mode": mode, "code_mode": self._code_mode,
+                "agents": list(MODES[mode].get("agents") or []),
+                "hint": str(MODES[mode].get("hint") or "")}
+        self.bus.emit("agent.started", {"agent": "orchestrator", "mode": mode,
+                                        "run_id": self.trajectory.run_id})
+        self.trajectory.append("mode.switch", mode, actor="system", data=info)
+        return info
+
+    async def run_parallel_agents(self, text: str, *, limit: int = 4) -> dict:
+        """Параллельный запуск сабагентов (п.8/28) с реальными генерациями."""
+        model = self.active_model
+        if model is None:
+            return {"ok": False, "error": "no model is available"}
+
+        async def _runner(**kwargs) -> dict:
+            from axiom.core.sandbox import Sandbox
+            from axiom.core.trajectory import Trajectory
+
+            task = str(kwargs.get("task") or text)
+            agent_id = str(kwargs.get("agent") or "")
+            parts: list[str] = []
+            # Each parallel request owns its agent state, state machine, config,
+            # registry and trajectory. Only the transport and stateless tool
+            # handlers are shared with the session.
+            request_config = self.config.model_copy(deep=True)
+            allowed = set(kwargs.get("tools") or ())
+            request_registry = self.tools.subset(allowed)
+            from axiom.core.tools.web_search import WebSearchTool
+
+            request_web_tool = WebSearchTool(self.provider, max_sources=self.config.search_max_sources)
+            if "web_search" in allowed or "fetch_url" in allowed:
+                request_web_tool.register(request_registry)
+            request_agent = Agent(
+                self.client, config=request_config, registry=request_registry,
+                machine=GenerationStateMachine(), web_tool=request_web_tool,
+            )
+            request_agent._client = self.provider_client
+            request_agent.attach_harness(
+                trajectory=Trajectory(actor=agent_id or "subagent"),
+                router=deepcopy(self.router), catalog=deepcopy(self.model_catalog),
+                sandbox=Sandbox(policies=dict(self.sandbox.policies),
+                                ask_callback=self.sandbox.ask_callback),
+                skills=deepcopy(self.skills),
+            )
+            try:
+                async for event in request_agent.run(
+                    [{"role": "user", "content": task}], model
+                ):
+                    if isinstance(event, ContentChunk):
+                        parts.append(event.text)
+            except Exception as exc:
+                return {"agent": agent_id, "error": f"{type(exc).__name__}: {exc}"}
+            return {"agent": agent_id, "content": "".join(parts).strip()[:2000]}
+
+        return await self.orchestrator.run(
+            text, self.trajectory, _runner, parallel=True, limit=limit
+        )
 
     # ------------------------------------------------------------- lifecycle
 
@@ -182,6 +485,21 @@ class ChatSession:
         model list straight from ``/api/tags``, and ``/api/ps``/``/api/show``
         stay lazy (only callers that actually need them request them).
         """
+        # MCP (п.15): подключаем внешние серверы из конфига (по умолчанию — пусто).
+        try:
+            await self._load_mcp_servers()
+        except Exception:
+            pass
+        # Plugins (п.20): установленные плагины применяются к skills.
+        try:
+            self.load_plugins()
+        except Exception:
+            pass
+        try:
+            discovered = await self.provider_manager.discover_models()
+            self.model_catalog.replace(discovered)
+        except Exception:
+            discovered = []
         try:
             version: str | None = None
             available = await self.client.is_available()
@@ -191,11 +509,17 @@ class ChatSession:
                 version = await self.client.version()
                 models = await self.registry.refresh()
             if not available or not models:
+                external = next((m for m in discovered if m.provider_id != "ollama"), None)
+                if external is not None:
+                    self.active_model = ModelInfo(name=external.id, capabilities=[
+                        name for name, enabled in (("tools", external.tool_calling),
+                                                     ("thinking", external.reasoning),
+                                                     ("vision", external.vision)) if enabled
+                    ])
+                    self.conversation.model = external.id
                 return StartupReport(
                     ollama_available=available,
                     version=version,
-                    # An empty model list is not an error: the project will also
-                    # talk to API providers, so the UI must never fail on it.
                     error=None,
                     hint=(
                         f"Start Ollama and make sure it listens on {self.client.base_url}"
@@ -208,6 +532,15 @@ class ChatSession:
                 self.active_model = selected
                 ModelRegistry.persist_selection(self.config, selected.name)
                 self.conversation.model = selected.name
+            elif discovered:
+                external = next((m for m in discovered if m.provider_id != "ollama"), None)
+                if external is not None:
+                    self.active_model = ModelInfo(name=external.id, capabilities=[
+                        name for name, enabled in (("tools", external.tool_calling),
+                                                     ("thinking", external.reasoning),
+                                                     ("vision", external.vision)) if enabled
+                    ])
+                    self.conversation.model = external.id
             return StartupReport(
                 ollama_available=True,
                 version=version,
@@ -261,6 +594,7 @@ class ChatSession:
             self.config.save()
             self.client = OllamaClient(self.config.ollama_url)
             self.registry = ModelRegistry(self.client)
+            self.provider_client.ollama_client = self.client
             self.agent = Agent(
                 self.client,
                 config=self.config,
@@ -268,6 +602,7 @@ class ChatSession:
                 machine=self.machine,
                 web_tool=self.web_tool,
             )
+            self.agent._client = self.provider_client
         return await self.startup()
 
     # ---------------------------------------------------------------- models
@@ -402,6 +737,20 @@ class ChatSession:
         elif self.config.terminal_enabled and self.config.access_mode != "read_only":
             self.terminal = TerminalTool(root=target, enabled=True)
             self.terminal.register(self.tools)
+        # Project Intelligence (п.19): авто-индекс + .axiom/ персист.
+        try:
+            from axiom.core.project_index import ProjectMemory as _PM
+            from axiom.core.project_index import index_project as _idx
+
+            self._project_memory = _PM(target)
+            index_obj = _idx(target)
+            self._project_memory.save_index(index_obj)
+            if self.trajectory is not None:
+                self.trajectory.append("project.index",
+                                       f"{target.name}: {','.join(index_obj.languages[:4])}",
+                                       actor="architect", data=index_obj.to_json())
+        except Exception:
+            pass
         self.workspaces.remember(target)
         return detect_project(target)
 
@@ -650,6 +999,30 @@ class ChatSession:
             return
 
         self.machine.reset()
+        # Harness: авто-детект режима (п.40) + запись user request в Trajectory.
+        try:
+            mode = self._detect_mode(text)
+            self.trajectory.append(
+                "user.request", text[:200] or "(images)",
+                actor="user", data={"mode": mode},
+            )
+            if mode != "chat":
+                self.bus.emit("agent.started", {"agent": "orchestrator", "mode": mode,
+                                                "run_id": self.trajectory.run_id})
+        except Exception:
+            pass
+        # Git Safety (п.12): чекпоинт перед генерацией (один на workspace-сессию).
+        try:
+            if self.workspace_root and not getattr(self, "_checkpointed", False):
+                from axiom.core.git_safety import create_checkpoint as _ckpt
+
+                checkpoint = _ckpt(self.workspace_root)
+                self._checkpoint = checkpoint
+                self._checkpointed = True
+                self.trajectory.append("git.checkpoint", checkpoint.ref[:16],
+                                       actor="system", data={"ref": checkpoint.ref})
+        except Exception:
+            pass
         if record_user:
             self.conversation.messages.append(
                 Message(
@@ -679,8 +1052,30 @@ class ChatSession:
                 break
             yield event
         self._task = None
+        # Persist Trajectory каждого запуска (п.10): resume/fork/replay из store.
+        try:
+            self.trajectory_store.save(self.trajectory)
+        except Exception:
+            pass
 
     # --------------------------------------------------------------- internals
+
+    def _context_budget(self) -> int | None:
+        """Real context window when it is known — never a guessed number.
+
+        Priority: explicit ``num_ctx`` override → the model's effective
+        ``num_ctx`` from ``/api/show`` → its maximum ``context_length``.
+        ``None`` means nothing was reported, so no narrowing decision is made.
+        """
+        explicit = getattr(self.config, "num_ctx", None)
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
+        model = self.active_model
+        for attribute in ("num_ctx", "context_length"):
+            value = getattr(model, attribute, None)
+            if isinstance(value, int) and value > 0:
+                return value
+        return None
 
     def _context_messages(self) -> list[dict]:
         """Convert stored messages into the Ollama request format.
@@ -688,20 +1083,52 @@ class ChatSession:
         Old reasoning traces are stripped: they bloat the prompt (a low-resource
         machine pays prompt-eval for every token) and anchored the model to its
         previous thought processes. Only the real answers go back to the model.
+
+        Auto-narrowing: when a real context window is known (``num_ctx`` or the
+        model's ``context_length``), the history is additionally trimmed to fit
+        it. The stored conversation and the trajectory stay complete — only the
+        payload sent to the model shrinks.
         """
         try:
             limit = max(4, min(int(self.config.context_messages), 200))
         except (TypeError, ValueError):
             limit = CONTEXT_MESSAGES
         history: list[dict] = []
+        root = self.workspace_root
         for message in self.conversation.messages[-limit:]:
             if message.role in ("user", "assistant") and (message.content or message.images):
-                entry: dict[str, Any] = {"role": message.role, "content": message.content}
+                content = message.content
+                if message.role == "user" and "@" in content:
+                    # ``@path`` mentions expand to real file content for the
+                    # MODEL only — the stored history keeps the user's text.
+                    content = expand_mentions(content, root)
+                entry: dict[str, Any] = {"role": message.role, "content": content}
                 if message.images:
                     # Ollama vision models expect base64 images per message.
                     entry["images"] = message.images
                 history.append(entry)
-        return history
+        budget = self._context_budget()
+        if not budget or not history:
+            return history
+        from axiom.core.context import ContextManager
+
+        manager = ContextManager(max_tokens=budget)
+        before_tokens = manager.estimate(history)
+        narrowed = [m for m in manager.prepare(history) if m.get("role") != "system"]
+        after_tokens = manager.estimate(narrowed)
+        if after_tokens < before_tokens:
+            trajectory = getattr(self, "trajectory", None)
+            if trajectory is not None:
+                try:
+                    trajectory.append(
+                        "context.narrow",
+                        f"auto-narrowed {before_tokens} → {after_tokens} est. tokens "
+                        f"(budget {budget})",
+                        data={"budget": budget, "before": before_tokens, "after": after_tokens},
+                    )
+                except Exception:
+                    pass
+        return narrowed
 
     def _final_status(self, target: GenerationState) -> StatusChange | None:
         """Emit a terminal status if the state machine allows it."""
@@ -755,6 +1182,76 @@ class ChatSession:
             )
         self._save_conversation()
 
+    async def _auto_verify(self) -> None:
+        """Авто-verify (п.12): после файловых правок BUILD/TEST/LINT via run_command."""
+        if getattr(self, "_verifying", False):
+            return
+        trajectory = getattr(self, "trajectory", None)
+        verify = getattr(self, "verifier", None)
+        agent = getattr(self, "agent", None)
+        if trajectory is None or verify is None or agent is None:
+            return
+        edited = [e for e in trajectory.events if e.kind == "tool.call"
+                  and str((e.data or {}).get("tool") or "") in
+                  ("write_file", "edit_file", "delete_file", "move_file", "copy_file")]
+        if not edited:
+            return
+        self._verifying = True
+        try:
+            async def _runner(**kwargs):
+                res = await self.run_terminal(str(kwargs.get("command") or ""), confirmed=True)
+                return {"ok": bool(res.get("ok")),
+                        "output": str(res.get("content") or res.get("error") or "")}
+
+            verify._runner = _runner
+            kind = "python"
+            try:
+                from axiom.core.project_index import index_project as _index
+
+                idx = _index(self.workspace_root) if self.workspace_root else None
+                langs = [str(v).lower() for v in (idx.languages if idx else [])]
+                if any("rust" in v for v in langs):
+                    kind = "rust"
+                elif any(v in ("typescript", "javascript") for v in langs):
+                    kind = "node"
+            except Exception:
+                kind = "python"
+            report = await verify.run(kind=kind)
+            agent.last_verify = {"ok": report.ok, "summary": report.summary(),
+                                 "errors": list(report.errors)}
+            trajectory.append("verify.report", report.summary(),
+                              actor="tester", data=dict(agent.last_verify))
+            self.bus.emit("test.finished", {"ok": report.ok, "summary": report.summary()})
+        finally:
+            self._verifying = False
+
+    async def _run_ptc(self, content: str, queue: asyncio.Queue[ChatEvent | None]) -> bool:
+        """Code / PTC mode (п.21): исполнить программу шагов из ответа модели."""
+        from axiom.core.ptc import parse_program, run_program
+
+        steps = parse_program(content)
+        if not steps:
+            return False
+        for step in steps:
+            queue.put_nowait(ToolCallEvent(name=str(step.get("tool") or ""),
+                                           arguments=dict(step.get("args") or {})))
+        summary = await run_program(
+            steps, self.tools, sandbox=self.sandbox, permissions=self.permissions,
+            trajectory=self.trajectory,
+        )
+        for entry in summary.get("results") or []:
+            queue.put_nowait(ToolResultEvent(
+                name=str(entry.get("tool") or ""),
+                ok=bool(entry.get("ok")),
+                content=str(entry.get("output") or ""),
+                error=entry.get("error"),
+            ))
+        self.trajectory.append(
+            "ptc.run", f"{summary.get('steps', 0)} step(s)",
+            actor="coder", data={"ok": summary.get("ok")},
+        )
+        return True
+
     async def _produce(
         self,
         text: str,
@@ -805,11 +1302,29 @@ class ChatSession:
                 )
             )
             self._record_turn(text, content, thinking)
+            try:
+                await self._auto_verify()
+            except Exception:
+                pass
+            if self._code_mode:
+                try:
+                    await self._run_ptc(content, queue)
+                except Exception:
+                    pass
         except asyncio.CancelledError:
             self._final_status_to(queue, GenerationState.CANCELLED)
             self._record_turn(text, "".join(content_parts).strip(), "".join(thinking_parts).strip())
             raise
         except AxiomError as exc:
+            # Provider fallback (п.17): пока контент не стримился — пробуем цепочку.
+            if not content_parts and self.router.should_fallback(exc) and self.router.config.chain():
+                handled = False
+                try:
+                    handled = await self._fallback_produce(text, queue, content_parts, thinking_parts)
+                except Exception:
+                    handled = False
+                if handled:
+                    return
             queue.put_nowait(ErrorEvent(message=str(exc), kind=exc.kind, hint=exc.hint))
             self._final_status_to(queue, GenerationState.ERROR)
         except Exception as exc:
@@ -823,6 +1338,77 @@ class ChatSession:
             self._final_status_to(queue, GenerationState.ERROR)
         finally:
             queue.put_nowait(None)
+
+    async def _fallback_produce(
+        self,
+        text: str,
+        queue: asyncio.Queue[ChatEvent | None],
+        content_parts: list[str],
+        thinking_parts: list[str],
+    ) -> bool:
+        """Цепочка fallback-провайдеров (п.17): 429/timeout/unavailable → следующий target.
+
+        Возвращает True, если хотя бы один провайдер дал контент (turn завершён
+        штатно: StatusChange + Done + запись в историю/trajectory).
+        """
+        from axiom.core.providers.base import ChatMessage, ProviderError
+
+        raw = self._context_messages()
+        messages = [
+            ChatMessage(role=str(m.get("role") or "user"),
+                        content=str(m.get("content") or ""))
+            for m in raw
+        ]
+        started = time.perf_counter()
+        attempts: list[dict] = []
+        for target in self.router.config.chain():
+            try:
+                provider = self.provider_manager.get_provider(target.provider_id)
+            except Exception:
+                continue
+            self.trajectory.append(
+                "router.fallback", f"{target.provider_id}/{target.model}",
+                actor="router",
+                data={"provider_id": target.provider_id, "model": target.model},
+            )
+            self.bus.emit("agent.step", {"agent": "router", "step": "fallback",
+                                         "provider": target.provider_id,
+                                         "run_id": self.trajectory.run_id})
+            got_content = False
+            try:
+                async for chunk in provider.stream(target.model, messages):
+                    if chunk.thinking:
+                        thinking_parts.append(chunk.thinking)
+                        queue.put_nowait(ReasoningChunk(text=chunk.thinking))
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        queue.put_nowait(ContentChunk(text=chunk.content))
+                        got_content = True
+                    if chunk.done:
+                        break
+            except ProviderError as exc:
+                attempts.append({"provider": target.provider_id, "error": str(exc)})
+                if self.router.should_fallback(exc):
+                    continue
+                return False
+            if got_content:
+                content = "".join(content_parts).strip()
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                status = self._final_status(GenerationState.COMPLETED)
+                if status:
+                    queue.put_nowait(status)
+                queue.put_nowait(Done(state=GenerationState.COMPLETED, duration_ms=duration_ms))
+                self._record_turn(text, content, "".join(thinking_parts).strip())
+                self.trajectory.append(
+                    "router.fallback.ok", f"{target.provider_id}/{target.model}",
+                    actor="router", data={"duration_ms": duration_ms},
+                )
+                return True
+            attempts.append({"provider": target.provider_id, "error": "empty response"})
+        if attempts:
+            self.trajectory.append("router.fallback.failed", "all targets failed",
+                                   actor="router", data={"attempts": attempts})
+        return False
 
     async def _produce_continue(
         self,

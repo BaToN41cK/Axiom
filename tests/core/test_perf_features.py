@@ -7,14 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from axiom.core.agent import Agent
+from axiom.core.benchmark import BenchmarkRunner, BenchmarkScenario
+from axiom.core.chat import ChatSession
 from axiom.core.config import Config
-from axiom.core.events import Done, Message
+from axiom.core.events import Message
 from axiom.core.history import HistoryStore
 from axiom.core.models import ModelInfo
 from axiom.core.ollama import OllamaClient
-from axiom.core.chat import ChatSession
+from axiom.core.performance import PerformanceMetrics
 
-from tests.core.test_chat import FakeClient, collect, make_session
+from tests.core.test_chat import FakeClient
 
 
 # ---------------------------------------------------------------- think levels
@@ -80,6 +82,34 @@ def test_context_messages_limits_history(tmp_path: Path):
     ctx = session._context_messages()
     assert len(ctx) == 4
     assert ctx[-1]["content"] == "ans 9"
+
+
+def test_context_auto_narrows_to_known_budget(tmp_path: Path):
+    cfg = Config(model="test-model:latest", context_messages=40, num_ctx=1024)
+    session = ChatSession(config=cfg, client=FakeClient(), history_store=HistoryStore(
+        directory=tmp_path / "history"
+    ))
+    for _ in range(30):
+        session.conversation.messages.append(Message(role="user", content="x" * 400))
+        session.conversation.messages.append(Message(role="assistant", content="y" * 400))
+    ctx = session._context_messages()
+    assert ctx  # never empty
+    assert len(ctx) < 60  # narrowed below the context_messages cap
+    assert ctx[-1]["content"].startswith("y")  # the newest turn survives
+    # The full trajectory stays intact: only the model payload shrinks.
+    assert any(event.kind == "context.narrow" for event in session.trajectory.events)
+
+
+def test_context_not_narrowed_without_a_known_budget(tmp_path: Path):
+    cfg = Config(model="test-model:latest", context_messages=40)
+    session = ChatSession(config=cfg, client=FakeClient(), history_store=HistoryStore(
+        directory=tmp_path / "history"
+    ))
+    for _ in range(10):
+        session.conversation.messages.append(Message(role="user", content="x" * 400))
+        session.conversation.messages.append(Message(role="assistant", content="y" * 400))
+    ctx = session._context_messages()
+    assert len(ctx) == 20  # unknown window → only the real message limit applies
 
 
 def test_reasoning_traces_stripped_from_context(tmp_path: Path):
@@ -236,3 +266,29 @@ async def test_list_running_bad_shape_returns_empty_list(monkeypatch):
     # Regression: this used to implicitly return None and crash callers
     # iterating over it with "'NoneType' object is not iterable".
     assert await OllamaClient().list_running() == []
+
+
+class _BenchmarkSession:
+    def __init__(self):
+        self.agent = type("A", (), {})()
+        self.agent.perf = PerformanceMetrics(model="m", ttft_ms=1.0, finished_ms=2.0)
+        self.sent = 0
+
+    async def startup(self):
+        return None
+
+    async def send(self, prompt):
+        self.sent += 1
+        if False:
+            yield None
+
+
+async def test_benchmark_runner_writes_json_cold_warm(tmp_path):
+    output = tmp_path / "report.json"
+    runner = BenchmarkRunner(lambda: _BenchmarkSession(), [BenchmarkScenario("short", "hello")],
+                             repetitions=2, output=output)
+    report = await runner.run()
+    assert output.exists()
+    assert report["runs"][0]["phase"] == "cold"
+    assert report["runs"][1]["phase"] == "warm"
+    assert report["summary"]["overall"]["count"] == 2

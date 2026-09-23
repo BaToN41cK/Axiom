@@ -51,6 +51,36 @@ async def test_ask_with_callback():
     assert accepted[0][0] == "web_search"
 
 
+async def test_async_approval_callback_is_awaited():
+    calls: list[str] = []
+
+    async def callback(name: str, args: dict[str, Any]) -> bool:
+        calls.append(name)
+        return True
+
+    mgr = PermissionManager(request_callback=callback)
+    mgr.mode = PermissionMode.ASK
+    assert await mgr.decide(
+        "terminal", {"command": "git status", "options": ["--short"]}, ToolPermission.ASK
+    ) is True
+    assert calls == ["terminal"]
+
+
+async def test_approval_cache_supports_nested_arguments():
+    calls: list[dict[str, Any]] = []
+
+    def callback(name: str, args: dict[str, Any]) -> bool:
+        calls.append(args)
+        return True
+
+    mgr = PermissionManager(request_callback=callback)
+    mgr.mode = PermissionMode.ASK
+    arguments = {"command": "git status", "options": ["--short"], "env": {"A": "1"}}
+    assert await mgr.decide("terminal", arguments, ToolPermission.ASK) is True
+    assert await mgr.decide("terminal", arguments, ToolPermission.ASK) is True
+    assert calls == [arguments]
+
+
 async def test_ask_denies_when_callback_false():
     def callback(name: str, args: dict[str, Any]) -> bool:
         return False

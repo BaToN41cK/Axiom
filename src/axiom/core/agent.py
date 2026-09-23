@@ -29,11 +29,15 @@ from axiom.core.events import (
 )
 from axiom.core.models import ModelInfo
 from axiom.core.ollama import OllamaClient, ToolCallRequest
+from axiom.core.performance import (
+    PerformanceMetrics,
+    classify_mode,
+    complexity_of,
+    thinking_level,
+    tool_scope,
+)
 from axiom.core.state import GenerationState
 from axiom.core.state_machine import GenerationStateMachine
-from axiom.core.tools.filesystem import WORKSPACE_TOOLS
-from axiom.core.tools.git_tools import GIT_TOOLS
-from axiom.core.tools.project_tools import PROJECT_TOOLS
 from axiom.core.tools.registry import ToolRegistry
 from axiom.core.tools.web_search import (
     FETCH_URL_TOOL,
@@ -142,6 +146,12 @@ class PassResult:
     metrics: dict = field(default_factory=dict)
     #: Real time-to-first-token of this pass (measured, not estimated).
     ttft_ms: int | None = None
+    #: Benchmark timestamps (perf_counter, seconds); used to build
+    #: :class:`~axiom.core.performance.PerformanceMetrics`.
+    http_started_at: float | None = None
+    first_chunk_at: float | None = None
+    first_visible_at: float | None = None
+    last_token_at: float | None = None
 
 
 class Agent:
@@ -155,18 +165,33 @@ class Agent:
         registry: ToolRegistry,
         machine: GenerationStateMachine,
         web_tool: WebSearchTool | None = None,
+        bus=None,
+        trajectory=None,
     ) -> None:
         self._client = client
         self._config = config
         self._registry = registry
         self._machine = machine
         self._web_tool = web_tool
+        # Harness-хуки (п.6/10): опциональны, старое поведение сохраняется.
+        self._bus = bus
+        self._trajectory = trajectory
+        # Harness-интеграции (п.13/14/16): тоже опциональны.
+        self._router = None
+        self._catalog = None
+        self._sandbox = None
+        self._skills = None
+        self._verifier = None
+        self.last_route: dict = {}
+        self.last_verify: dict = {}
         self._max_rounds = MAX_TOOL_ROUNDS + (3 if config.workspace_tools_enabled else 0)
         self.last_sources: list[SourceItem] = []
         self.last_content = ""
         self.last_thinking = ""
         self.last_metrics: dict = {}
         self.metrics: dict = {}
+        #: Benchmark profile of the most recent run (set by :meth:`run`).
+        self.perf: PerformanceMetrics | None = None
         #: Pages read because the user pasted their links, as (url, text).
         self._pasted_pages: list[tuple[str, str]] = []
 
@@ -190,72 +215,95 @@ class Agent:
         Priority: explicit config value (bool or level string) → thinking_mode
         preset → per-request heuristic → model capability. Deterministic only:
         the level depends on the message history shape, never on an extra LLM
-        classifier call (which would double the latency it tries to save).
+        classifier call. The Performance Engine corrects the level using the
+        real TTFT / throughput measured on the previous run.
         """
         explicit = self._config.think
         if explicit is not None:
             return explicit
-        mode = getattr(self._config, "thinking_mode", "auto")
-        level = {"fast": "low", "normal": "medium", "deep": "high"}.get(mode)
-        if level is not None:
-            return level
-        if model.supports("thinking") is not True:
-            return None
-        # Heuristic: hard tasks deserve deeper reasoning than small talk.
-        user_text = self._last_user_text(history)
-        if not user_text:
-            return "low"
-        text = user_text.lower()
-        if any(
-            marker in text
-            for marker in (
-                "почему", "придумай", "реши", "напиши", "рефактор", "отлад",
-                "debug", "why ", "explain", "design", "optimi", "architect",
-            )
-        ):
-            return "high"
-        if len(text) > 200:
-            return "medium"
-        return "low"
+        metrics = self.last_metrics or {}
+        return thinking_level(
+            self._last_user_text(history),
+            model_supports_thinking=model.supports("thinking") is True,
+            mode=getattr(self._config, "thinking_mode", "auto"),
+            budget=getattr(self._config, "router_budget", "balanced"),
+            last_ttft_ms=metrics.get("ttft_ms"),
+            last_tokens_per_second=metrics.get("tokens_per_second"),
+        )
 
     def _tool_schemas(
         self, model: ModelInfo, user_text: str | None = None
     ) -> list[dict] | None:
-        """Only offer tools the model supports AND this request plausibly needs.
+        """Only offer tools this request plausibly needs (aggressive scope).
 
-        A smaller tool schema means fewer prompt tokens per round on a local
-        model. Git tools are only advertised when the request mentions git;
-        file tools only when it mentions files/code or the request is clearly
-        about the project. Web tools stay always-on (cheap, two entries).
+        The deterministic resolver (no extra model call) maps the request to
+        the minimum category: an ordinary question gets zero tools, a file
+        question gets the read tools, an edit gets read+edit, git gets the git
+        tools, a terminal request gets ``run_command`` and a web request keeps
+        the two web tools. Sandbox DENY-tools are never advertised at all.
         """
         if not self._config.web_search_enabled and not self._config.workspace_tools_enabled:
             return None
         if model.supports("tools") is not True:
             return None
-        allowed: set[str] = set(OFFERED_TOOLS)
-        if self._config.workspace_tools_enabled:
-            text = (user_text or "").lower()
-            mentions_git = any(
-                marker in text
-                for marker in ("git", "коммит", "commit", "ветк", "branch", "diff", "лог", "log")
-            )
-            mentions_files = any(
-                marker in text
-                for marker in (
-                    "файл", "функци", "код", "проект", "папк", "рефактор", "ошибк",
-                    "file", "code", "project", "folder", "refactor", "bug", "implement",
-                    "test", "тест", "script", "скрипт", "модул", "class", "класс",
-                )
-            )
-            if mentions_git:
-                allowed.update(GIT_TOOLS)
-            if mentions_files or not text:
-                allowed.update(WORKSPACE_TOOLS)
-                allowed.update(PROJECT_TOOLS)
-                if self._config.terminal_enabled and self._config.access_mode != "read_only":
-                    allowed.add("run_command")
+        terminal_ok = self._config.terminal_enabled and self._config.access_mode != "read_only"
+        scope = tool_scope(
+            user_text or "",
+            workspace=self._config.workspace_tools_enabled,
+            terminal=terminal_ok,
+            web=self._config.web_search_enabled,
+        )
+        if not scope:
+            return None
+        allowed: set[str] = set(scope)
+        if not terminal_ok:
+            allowed.discard("run_command")
+            allowed.discard("run_tests")
+        # Sandbox (п.13): DENY-тулы не рекламируем модели вообще.
+        if self._sandbox is not None:
+            allowed = {name for name in allowed if self._sandbox.allows(name)}
         schemas = [s for s in self._registry.schemas() if s["function"]["name"] in allowed]
         return schemas or None
+
+    def _route_info(self, user_text: str) -> dict:
+        """Model Router (п.16): какой маршрут выбран — для trajectory/UI."""
+        if self._router is None:
+            return {}
+        try:
+            target = self._router.route(user_text, self._catalog)
+        except Exception:
+            return {}
+        if target is None:
+            return {}
+        info = {"provider_id": target.provider_id, "model": target.model,
+                "reason": target.reason}
+        self.last_route = info
+        if self._trajectory is not None:
+            try:
+                self._trajectory.append("router.route",
+                                        f"{target.provider_id}/{target.model} ({target.reason})",
+                                        data=info)
+            except Exception:
+                pass
+        return info
+
+    def _sandbox_decision(self, tool_name: str) -> str:
+        if self._sandbox is None:
+            return "auto"
+        try:
+            return self._sandbox.decide(tool_name)
+        except Exception:
+            return "ask"
+
+    def _skill_blocks(self, user_text: str) -> list[str]:
+        """Skills (п.14): авто-инжект подходящих skill-блоков в system."""
+        if self._skills is None:
+            return []
+        try:
+            hits = self._skills.resolve_for_task(user_text or "")
+        except Exception:
+            return []
+        return [block for s in hits[:3] if (block := s.prompt_block())]
 
     @staticmethod
     def _int_or_none(value) -> int | None:
@@ -296,10 +344,16 @@ class Agent:
         result: PassResult,
     ) -> AsyncIterator[ChatEvent]:
         """Stream one real model pass, emitting reasoning/content deltas."""
+        if self._bus is not None:
+            try:
+                self._bus.emit("model.request", {"model": model.name, "messages": len(messages)})
+            except Exception:
+                pass
         stream_started = time.perf_counter()
         saw_thinking = False
         saw_content = False
         first_token_at: float | None = None
+        result.http_started_at = stream_started
         options: dict = {}
         if self._config.temperature is not None:
             options["temperature"] = self._config.temperature
@@ -319,6 +373,7 @@ class Agent:
         ):
             if first_token_at is None and (chunk.thinking or chunk.content or chunk.tool_calls):
                 first_token_at = time.perf_counter()
+                result.first_chunk_at = first_token_at
                 result.ttft_ms = int((first_token_at - stream_started) * 1000)
             if chunk.thinking:
                 if not saw_thinking:
@@ -327,20 +382,37 @@ class Agent:
                     if status:
                         yield status
                 result.thinking += chunk.thinking
+                result.last_token_at = time.perf_counter()
                 yield ReasoningChunk(text=chunk.thinking)
             if chunk.content:
                 if not saw_content:
                     saw_content = True
+                    if result.first_visible_at is None:
+                        result.first_visible_at = time.perf_counter()
                     status = self._status(GenerationState.RECEIVING)
                     if status:
                         yield status
                 result.content += chunk.content
+                result.last_token_at = time.perf_counter()
                 yield ContentChunk(text=chunk.content)
             if chunk.tool_calls:
                 result.tool_calls.extend(chunk.tool_calls)
+                result.last_token_at = time.perf_counter()
             if chunk.metrics:
                 result.metrics = chunk.metrics
             if chunk.done:
+                if self._bus is not None:
+                    try:
+                        self._bus.emit("model.response",
+                                       {"model": model.name, "metrics": dict(chunk.metrics or {})})
+                    except Exception:
+                        pass
+                if self._trajectory is not None:
+                    try:
+                        self._trajectory.append("model.response", f"{model.name} done",
+                                                data={"metrics": dict(chunk.metrics or {})})
+                    except Exception:
+                        pass
                 break
 
     async def _execute_tool(
@@ -372,7 +444,32 @@ class Agent:
         if status:
             yield status
         yield ToolCallEvent(name=call.name, arguments=call.arguments)
-        result = await self._registry.execute(call.name, call.arguments)
+        if self._bus is not None:
+            try:
+                self._bus.emit("tool.before", {"tool": call.name, "arguments": call.arguments})
+            except Exception:
+                pass
+        # Sandbox-enforce (п.13): DENY блокирует ДО исполнения хендлера.
+        if self._sandbox_decision(call.name) == "deny":
+            from axiom.core.tools.base import ToolResult as _TR
+
+            result = _TR(name=call.name, ok=False,
+                         error=f"Blocked by sandbox policy: {call.name} is denied.")
+        else:
+            result = await self._registry.execute(call.name, call.arguments)
+        if self._bus is not None:
+            try:
+                self._bus.emit("tool.after", {"tool": result.name, "ok": result.ok,
+                                              "duration_ms": result.duration_ms})
+            except Exception:
+                pass
+        if self._trajectory is not None:
+            try:
+                self._trajectory.append("tool.call", f"{call.name} {detail}",
+                                        data={"tool": call.name, "arguments": call.arguments,
+                                              "ok": result.ok, "duration_ms": result.duration_ms})
+            except Exception:
+                pass
         yield ToolResultEvent(
             name=result.name,
             ok=result.ok,
@@ -457,6 +554,22 @@ class Agent:
 
     # ------------------------------------------------------------- agent loop
 
+    def attach_harness(self, bus=None, trajectory=None, router=None, catalog=None,
+                       sandbox=None, skills=None, verifier=None) -> None:
+        """Подключить EventBus + Trajectory + Router + Sandbox + Skills (п.6/10/13/14/16)."""
+        self._bus = bus if bus is not None else self._bus
+        self._trajectory = trajectory if trajectory is not None else self._trajectory
+        if router is not None:
+            self._router = router
+        if catalog is not None:
+            self._catalog = catalog
+        if sandbox is not None:
+            self._sandbox = sandbox
+        if skills is not None:
+            self._skills = skills
+        if verifier is not None:
+            self._verifier = verifier
+
     async def run(
         self,
         history: list[dict],
@@ -535,7 +648,38 @@ class Agent:
         messages = self._build_messages(history, system)
         think = self._think_param(model, history)
         user_text = self._last_user_text(history)
+        # Performance Engine: quick (one pass, no tools) vs agent (tool loop).
+        # Deterministic, recorded in the trajectory — never a hidden guess.
+        mode = classify_mode(user_text or "")
+        if self._trajectory is not None:
+            try:
+                self._trajectory.append(
+                    "policy.mode",
+                    f"mode={mode} complexity={complexity_of(user_text or '', context_messages=len(history))}",
+                    data={"mode": mode, "context_messages": len(history)},
+                )
+            except Exception:
+                pass
+        # Harness: router-решение + skills-инжект пишутся в trajectory.
+        self._route_info(user_text)
+        for block in self._skill_blocks(user_text):
+            system = f"{system}\n\n{block}"
+            if self._trajectory is not None:
+                try:
+                    self._trajectory.append("context.skill", block.splitlines()[0][:120],
+                                            data={"block": block[:2000]})
+                except Exception:
+                    pass
+            messages = self._build_messages(history, system)
         rounds = 0
+        tool_rounds = 0
+        tool_total_s = 0.0
+        prompt_built_at = time.perf_counter()
+        first_pass = True
+        first_http_at: float | None = None
+        first_chunk_at: float | None = None
+        first_visible_at: float | None = None
+        last_token_at: float | None = None
         while True:
             tools = self._tool_schemas(model, user_text)
             status = self._status(GenerationState.CONNECTING, detail=model.name)
@@ -552,6 +696,16 @@ class Agent:
             if result.metrics:
                 self.last_metrics = result.metrics
             last_ttft = result.ttft_ms if result.ttft_ms is not None else last_ttft
+            if first_pass and result.http_started_at is not None:
+                first_http_at = result.http_started_at
+            if first_chunk_at is None and result.first_chunk_at is not None:
+                first_chunk_at = result.first_chunk_at
+            if first_visible_at is None and result.first_visible_at is not None:
+                first_visible_at = result.first_visible_at
+            if result.last_token_at is not None and (last_token_at is None or
+                                                     result.last_token_at >= last_token_at):
+                last_token_at = result.last_token_at
+            first_pass = False
 
             if not result.tool_calls:
                 break
@@ -563,10 +717,13 @@ class Agent:
                 messages.append({"role": "assistant", "content": result.content})
             for call in result.tool_calls:
                 tool_block = ""
+                tool_call_started = time.perf_counter()
                 async for event in self._execute_tool(call):
                     if isinstance(event, ToolResultEvent) and event.ok:
                         tool_block = event.content
                     yield event
+                tool_total_s += time.perf_counter() - tool_call_started
+                tool_rounds += 1
                 if tool_block:
                     messages.append(
                         {
@@ -576,6 +733,67 @@ class Agent:
                     )
 
         self.metrics = self._metrics(self.last_metrics, started, ttft_ms=last_ttft)
+        self.perf = self._build_perf(
+            raw_metrics=self.last_metrics,
+            started=started,
+            prompt_built_at=prompt_built_at,
+            http_at=first_http_at,
+            first_chunk_at=first_chunk_at,
+            first_visible_at=first_visible_at,
+            last_token_at=last_token_at,
+            model=model,
+            think=think,
+            tools=bool(tools),
+            context_chars=sum(len(str(m.get("content", ""))) for m in messages),
+            reasoning_chars=len(self.last_thinking),
+            answer_chars=len(self.last_content),
+            tool_rounds=tool_rounds,
+            tool_s=tool_total_s,
+        )
+
+    @staticmethod
+    def _build_perf(
+        *,
+        raw_metrics: dict,
+        started: float,
+        prompt_built_at: float,
+        http_at: float | None,
+        first_chunk_at: float | None,
+        first_visible_at: float | None,
+        last_token_at: float | None,
+        model: ModelInfo,
+        think: bool | str | None,
+        tools: bool,
+        context_chars: int,
+        reasoning_chars: int,
+        answer_chars: int,
+        tool_rounds: int,
+        tool_s: float,
+    ) -> PerformanceMetrics:
+        """Assemble a :class:`PerformanceMetrics` from raw timestamps."""
+        finished = time.perf_counter()
+
+        def _ms(timestamp: float | None) -> float | None:
+            return round((timestamp - started) * 1000, 2) if timestamp is not None else None
+
+        perf = PerformanceMetrics.from_ollama(
+            raw_metrics or {},
+            model=model.name,
+            think=str(think) if think is not None else None,
+            tools=tools,
+            context_chars=context_chars,
+            reasoning_chars=reasoning_chars,
+            answer_chars=answer_chars,
+            tool_rounds=tool_rounds,
+            tool_ms=round(tool_s * 1000, 2) if tool_rounds else None,
+            prompt_built_ms=_ms(prompt_built_at),
+            http_start_ms=_ms(http_at),
+            first_chunk_ms=_ms(first_chunk_at),
+            first_visible_ms=_ms(first_visible_at),
+            last_token_ms=_ms(last_token_at),
+            finished_ms=round((finished - started) * 1000, 2),
+        )
+        return perf
 
     @staticmethod
     def _last_user_text(history: list[dict]) -> str:

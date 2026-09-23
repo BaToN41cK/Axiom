@@ -116,3 +116,150 @@ class GitTools:
         all_branches = self._run_git(["branch", "--list"])
         body = f"Current: {current or '(detached)'}\n{all_branches.content}".strip()
         return ToolResult(name=GIT_BRANCH_TOOL, ok=True, content=body)
+
+
+# ---------------------------------------------------------------- user git ops
+#
+# Write operations (stage / unstage / commit) are intentionally NOT registered
+# as agent tools (§17: the model never rewrites history on its own). The GUI
+# calls these helpers directly from the user's own button clicks, sandboxed to
+# the workspace root like every other path handling here.
+
+
+def _resolve_in_root(root: Path, rel: str) -> Path:
+    """Resolve ``rel`` strictly inside ``root`` or raise ValueError."""
+    clean = (rel or "").strip()
+    if not clean:
+        raise ValueError("Path is empty")
+    if any(part == ".." for part in clean.replace("\\", "/").split("/")):
+        raise ValueError(f"Path escapes the repository: {rel}")
+    full = (root / clean).resolve()
+    if full != root and root not in full.parents:
+        raise ValueError(f"Path escapes the repository: {rel}")
+    return full
+
+
+def git_stage(root: Path, paths: list[str]) -> str:
+    """``git add`` the given workspace-relative paths. Returns git output."""
+    if not (root / ".git").exists():
+        raise ValueError("Not a git repository")
+    resolved = [str(_resolve_in_root(root, p)) for p in paths] or ["-A"]
+    proc = subprocess.run(
+        ["git", "add", "--", *resolved],
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError((proc.stderr or proc.stdout or "git add failed").strip())
+    return proc.stdout.strip()
+
+
+def git_unstage(root: Path, paths: list[str]) -> str:
+    """``git restore --staged`` the given paths (all staged when empty)."""
+    if not (root / ".git").exists():
+        raise ValueError("Not a git repository")
+    if paths:
+        resolved = [str(_resolve_in_root(root, p)) for p in paths]
+        args = ["git", "restore", "--staged", "--", *resolved]
+    else:
+        args = ["git", "reset", "--quiet"]
+    proc = subprocess.run(
+        args,
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError((proc.stderr or proc.stdout or "git reset failed").strip())
+    return proc.stdout.strip()
+
+
+def git_commit(root: Path, message: str, *, all: bool = False) -> str:
+    """Commit staged changes (optionally staging everything first)."""
+    if not (root / ".git").exists():
+        raise ValueError("Not a git repository")
+    clean = (message or "").strip()
+    if not clean:
+        raise ValueError("Commit message is empty")
+    args = ["git", "commit", "-m", clean]
+    if all:
+        args.insert(2, "-a")
+    proc = subprocess.run(
+        args,
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError((proc.stderr or proc.stdout or "git commit failed").strip())
+    return proc.stdout.strip() or "Committed."
+
+
+def git_diff_file(root: Path, path: str = "") -> str:
+    """Unified diff of one file (staged + unstaged vs HEAD), new files included."""
+    if not (root / ".git").exists():
+        raise ValueError("Not a git repository")
+    target = str(_resolve_in_root(root, path)) if path else None
+    args = ["git", "diff", "--no-color", "HEAD", "--"]
+    if target:
+        args.append(target)
+    proc = subprocess.run(
+        args,
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    diff = proc.stdout
+    if not diff.strip() and target:
+        # Untracked file: synthesize a /dev/null → b/ unified diff.
+        try:
+            rel = Path(target).resolve().relative_to(root.resolve())
+        except ValueError as exc:
+            raise ValueError("Path escapes the repository") from exc
+        content = Path(target).read_text(encoding="utf-8", errors="replace")
+        lines = content.splitlines()
+        body = "\n".join(f"+{line}" for line in lines)
+        diff = (
+            f"--- /dev/null\n+++ b/{rel.as_posix()}\n"
+            f"@@ -0,0 +1,{len(lines)} @@\n{body}\n"
+        )
+    if proc.returncode != 0 and not diff.strip():
+        raise ValueError((proc.stderr or "git diff failed").strip())
+    return diff.rstrip() + "\n" if diff.strip() else ""
+
+
+def git_switch(root: Path, branch: str) -> str:
+    """``git switch`` to an existing local branch (user-initiated, §17)."""
+    clean = (branch or "").strip()
+    if not clean:
+        raise ValueError("Branch name is empty")
+    # A leading dash would make git parse the name as an option.
+    if clean.startswith("-"):
+        raise ValueError(f"Invalid branch name: {branch}")
+    if not (root / ".git").exists():
+        raise ValueError("Not a git repository")
+    proc = subprocess.run(
+        ["git", "switch", clean],
+        cwd=root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=_TIMEOUT,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError((proc.stderr or proc.stdout or "git switch failed").strip())
+    return proc.stdout.strip() or f"Switched to {clean}"

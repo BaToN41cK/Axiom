@@ -53,6 +53,8 @@ def _conversation_summary(c) -> dict:
         "createdAt": c.created_at,
         "updatedAt": c.updated_at,
         "messageCount": len(c.messages),
+        "pinned": c.pinned,
+        "folder": c.folder,
     }
 
 
@@ -211,6 +213,46 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         }
     if cmd == "models":
         return await _models_json(session)
+    if cmd == "providers":
+        return session.provider_manager.status_rows()
+    if cmd == "provider_test":
+        return await session.provider_manager.test_provider(str(args["provider_id"]))
+    if cmd == "provider_set_key":
+        session.provider_manager.set_key(str(args["provider_id"]), str(args.get("api_key") or ""))
+        return {"configured": True}
+    if cmd == "provider_set_base_url":
+        provider_id = str(args["provider_id"])
+        base_url = str(args.get("base_url") or "").strip()
+        if not base_url:
+            raise ValueError("Base URL is required")
+        session.provider_manager.set_provider(provider_id, base_url=base_url)
+        return {"provider_id": provider_id, "base_url": base_url}
+    if cmd == "provider_discover":
+        return await session.provider_manager.model_rows(str(args["provider_id"]))
+    if cmd == "provider_pick_model":
+        provider_id, model = str(args["provider_id"]), str(args["model"])
+        session.config.router_primary = {"provider_id": provider_id, "model": model}
+        session.config.save()
+        session._configure_router_from_config()
+        return {"provider_id": provider_id, "model": model}
+    if cmd == "permissions":
+        mode = str(args.get("mode") or "ask")
+        if mode not in {"ask", "auto_approve_safe", "auto_approve_all"}:
+            raise ValueError("Unknown permission mode")
+        session.permissions.mode = type(session.permissions.mode)(mode)
+        session.config.permission_mode = mode
+        session.config.save()
+        return {"mode": mode}
+    if cmd == "profiles":
+        return {"active": session.profiles.active_name, "items": [
+            {"id": name, "name": name, "prompt": prompt}
+            for name, prompt in session.profiles.all.items()
+        ]}
+    if cmd == "trajectory":
+        return session.trajectory.viewer()
+    if cmd == "agents":
+        return [{"id": a.id, "label": a.label, "provider_id": a.provider_id,
+                 "model": a.model, "tools": a.tools} for a in session.agent_registry.all()]
     if cmd == "send":
         return await _stream_turn(
             session,
@@ -342,6 +384,103 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
             log = await session.git_tools._log(10)
             data["log"] = {"ok": log.ok, "content": log.content, "error": log.error}
         return data
+    if cmd in ("git_stage", "git_unstage", "git_commit", "git_diff_file", "git_switch"):
+        # User-initiated write ops (never agent tools, §17) — sandboxed helpers.
+        from axiom.core.tools.git_tools import (
+            git_commit,
+            git_diff_file,
+            git_stage,
+            git_switch,
+            git_unstage,
+        )
+
+        root = session.workspace_root
+        if root is None:
+            raise ValueError("No project is open")
+        paths = [str(p) for p in (args.get("paths") or [])]
+        try:
+            if cmd == "git_stage":
+                return {"ok": True, "output": git_stage(root, paths)}
+            if cmd == "git_unstage":
+                return {"ok": True, "output": git_unstage(root, paths)}
+            if cmd == "git_commit":
+                return {
+                    "ok": True,
+                    "output": git_commit(root, str(args.get("message", "")),
+                                         all=bool(args.get("all"))),
+                }
+            if cmd == "git_switch":
+                return {"ok": True, "output": git_switch(root, str(args.get("branch", "")))}
+            return {"ok": True, "diff": git_diff_file(root, str(args.get("path", "")))}
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+    if cmd == "apply_patch":
+        # Apply a ```diff block from an answer to a workspace file.
+        from axiom.core.patch import PatchError, apply_unified_diff
+
+        root = session.workspace_root
+        if root is None:
+            raise ValueError("No project is open")
+        if session.config.access_mode == "read_only":
+            raise ValueError("Access mode is read-only")
+        rel = str(args.get("path", "")).strip()
+        patch = str(args.get("patch", ""))
+        if not rel or not patch:
+            raise ValueError("Both path and patch are required")
+        if any(part == ".." for part in rel.replace("\\", "/").split("/")):
+            raise ValueError(f"Path escapes the project: {rel}")
+        target = (root / rel).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(f"Path escapes the project: {rel}")
+        try:
+            original = target.read_text(encoding="utf-8") if target.exists() else ""
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            updated = apply_unified_diff(original, patch)
+        except PatchError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(updated, encoding="utf-8")
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "path": rel}
+    if cmd == "search_chats":
+        hits = session.history_store.search(str(args.get("query", "")))
+        return {"hits": hits}
+    if cmd == "chat_meta":
+        cid = str(args.get("id", ""))
+        ok = session.history_store.set_meta(
+            cid,
+            pinned=args.get("pin") if "pin" in args else None,
+            folder=args.get("folder", ...),
+        )
+        return {"ok": ok}
+    if cmd in ("shell_start", "shell_write", "shell_read", "shell_stop"):
+        # Interactive shell session (pipes, one process per GUI panel).
+        from axiom.core.tools.shell import ShellSession
+
+        if session.config.access_mode == "read_only" or not session.config.terminal_enabled:
+            raise ValueError("Terminal is disabled in settings")
+        shell = getattr(session, "gui_shell", None)
+        if cmd == "shell_start":
+            if shell is None or not shell.running:
+                root = session.workspace_root
+                shell = ShellSession(root)
+                shell.start()
+                session.gui_shell = shell
+            return {"running": shell.running, "output": shell.read()}
+        if shell is None:
+            return {"running": False, "output": ""}
+        if cmd == "shell_write":
+            ok = shell.write(str(args.get("line", "")))
+            return {"running": shell.running, "ok": ok}
+        if cmd == "shell_read":
+            return {"running": shell.running, "output": shell.read()}
+        shell.stop()
+        session.gui_shell = None
+        return {"running": False, "output": ""}
     if cmd == "get_config":
         return json.loads(session.config.model_dump_json())
     if cmd == "set_config":
@@ -352,6 +491,10 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         new_cfg = Config.model_validate(current)
         new_cfg.save()
         session.config = new_cfg
+        session._configure_router_from_config()
+        permissions = getattr(session, "permissions", None)
+        if permissions is not None:
+            permissions._config = new_cfg
         # Agent and web tool read live attributes; update them defensively.
         agent = getattr(session, "agent", None)
         if agent is not None:

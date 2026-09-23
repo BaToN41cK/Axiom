@@ -78,6 +78,18 @@ class Config(BaseModel):
     #: Global permission mode: ask, auto_approve_safe, auto_approve_all
     permission_mode: str = "auto_approve_safe"
 
+    # ------------------------------------------------------- harness routing
+    #: Enable the Model Router (п.16): pick provider/model per task type
+    router_enabled: bool = True
+    #: performance | balanced | economy (п.19 cost-aware routing)
+    router_budget: Literal["performance", "balanced", "economy"] = "balanced"
+    #: Primary route target {"provider_id": "...", "model": "..."} or None
+    router_primary: dict | None = None
+    #: Fallback chain [{"provider_id": "...", "model": "..."}, ...] (п.17)
+    router_fallbacks: list[dict] = Field(default_factory=list)
+    #: External MCP servers [{"name": "...", "command": ["npx", ...]}] (п.15)
+    mcp_servers: list[dict] = Field(default_factory=list)
+
     # ------------------------------------------------------------ workspace UI
     #: UI density of the desktop workspace
     density: Literal["compact", "comfortable", "spacious"] = "comfortable"

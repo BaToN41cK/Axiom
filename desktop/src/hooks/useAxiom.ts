@@ -19,10 +19,12 @@ import {
   request,
   restartCore,
 } from "../bridge";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { commandByName, matchingCommands, parseCommand } from "../lib/commands";
 import { stripDataUrl } from "../lib/format";
 import type {
   AxiomConfig,
+  ChatHit,
   Conversation,
   CoreEvent,
   DoneMetrics,
@@ -35,15 +37,20 @@ import type {
   StatusReport,
   TerminalResult,
   ToolInfo,
+  ProviderRow,
+  ProviderModelRow,
+  AgentRow,
+  TrajectoryViewer,
   TreeNode,
   WorkspaceState,
 } from "../types";
 
 export type Phase = "booting" | "ready" | "unavailable" | "error";
-export type Overlay = "help" | "status" | "tools" | "context" | null;
+export type Overlay = "help" | "status" | "tools" | "context" | "harness" | null;
 export type SettingsSection =
   | "general"
   | "models"
+  | "providers"
   | "chat"
   | "tools"
   | "appearance"
@@ -210,6 +217,25 @@ export function useAxiom() {
 
   // ----------------------------------------------------------------- config
   const [config, setConfig] = useState<AxiomConfig | null>(null);
+  const [providerRows, setProviderRows] = useState<ProviderRow[]>([]);
+  const [providerModels, setProviderModels] = useState<ProviderModelRow[]>([]);
+  const [providerLoading, setProviderLoading] = useState(false);
+  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const [profiles, setProfiles] = useState<{ active: string; items: { id: string; name: string; prompt: string }[] }>({ active: "", items: [] });
+  const [trajectory, setTrajectory] = useState<TrajectoryViewer | null>(null);
+
+  // ------------------------------------------------- full-text chat search
+  const [chatHits, setChatHits] = useState<Record<string, string>>({});
+
+  // ------------------------------------------------------- model warm-up UI
+  const [warming, setWarming] = useState(false);
+
+  // ------------------------------------------------ command palette (Ctrl+Shift+P)
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  // ---------------------------------------------- interactive shell session
+  const [shellRunning, setShellRunning] = useState(false);
+  const [shellOutput, setShellOutput] = useState("");
 
   // ------------------------------------------------------- project workspace
   const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
@@ -263,12 +289,35 @@ export function useAxiom() {
   const pendingTextRef = useRef({ content: "", thinking: "" });
   const rafRef = useRef<number | null>(null);
   const bootedRef = useRef(false);
+  /** Tokens that cancel superseded background tasks (warm-up, chat search). */
+  const warmupTokenRef = useRef(0);
+  const searchSeqRef = useRef(0);
 
   // ---------------------------------------------------------------- toasts
   function notify(text: string, kind: Toast["kind"] = "info") {
     const id = ++toastId;
     setToasts((list) => [...list.slice(-2), { id, text, kind }]);
     window.setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), 4200);
+  }
+
+  /**
+   * Desktop toast when a real answer finishes while the window is away.
+   * Best-effort: OS notifications need the Tauri notification plugin and the
+   * user's permission — any failure must never disturb the session.
+   */
+  function notifyAnswerReady(metrics: DoneMetrics) {
+    if (metrics.state !== "completed") return;
+    // The user is already looking at the answer — no toast needed.
+    if (document.hasFocus()) return;
+    void (async () => {
+      try {
+        let granted = await isPermissionGranted();
+        if (!granted) granted = (await requestPermission()) === "granted";
+        if (granted) sendNotification({ title: "AXIOM", body: "Ответ готов" });
+      } catch {
+        /* notifications are optional (plugin/permission unavailable) */
+      }
+    })();
   }
 
   // ------------------------------------------------- streaming text batching
@@ -402,6 +451,72 @@ export function useAxiom() {
     }
   }
 
+  // ------------------------------------------------------ git write ops (§17)
+  /** Run a user-initiated git write op and refresh the panel (never agent-driven). */
+  async function gitWrite(cmd: string, args: Record<string, unknown>): Promise<boolean> {
+    try {
+      const res = await request<{ ok: boolean; error?: string; output?: string }>(cmd, args);
+      if (!res.ok) {
+        notify(res.error ?? "Операция Git не выполнена", "error");
+        return false;
+      }
+      void loadGit();
+      return true;
+    } catch (err) {
+      notify(errorText(err), "error");
+      return false;
+    }
+  }
+
+  /** Stage files (empty list = everything). */
+  async function gitStage(paths: string[]): Promise<boolean> {
+    return gitWrite("git_stage", { paths });
+  }
+
+  /** Unstage files (empty list = all staged). */
+  async function gitUnstage(paths: string[]): Promise<boolean> {
+    return gitWrite("git_unstage", { paths });
+  }
+
+  async function gitCommit(message: string, all = false): Promise<boolean> {
+    const ok = await gitWrite("git_commit", { message, all });
+    if (ok) notify("Коммит создан", "ok");
+    return ok;
+  }
+
+  /** Unified diff of one file ("" when there are no changes). */
+  async function gitShowDiff(path: string): Promise<string | null> {
+    try {
+      const res = await request<{ ok: boolean; diff?: string; error?: string }>("git_diff_file", { path });
+      if (!res.ok) {
+        notify(res.error ?? "Не удалось получить diff", "error");
+        return null;
+      }
+      return res.diff ?? "";
+    } catch (err) {
+      notify(errorText(err), "error");
+      return null;
+    }
+  }
+
+  /** Switch the workspace repo to an existing local branch. */
+  async function switchBranch(branch: string): Promise<boolean> {
+    try {
+      const res = await request<{ ok: boolean; error?: string; output?: string }>("git_switch", { branch });
+      if (!res.ok) {
+        notify(res.error ?? `Не удалось переключиться на ${branch}`, "error");
+        return false;
+      }
+      notify(`Ветка: ${branch}`, "ok");
+      void loadGit();
+      void loadWorkspace(); // the branch is shown in the project header
+      return true;
+    } catch (err) {
+      notify(errorText(err), "error");
+      return false;
+    }
+  }
+
   async function runBoot() {
     setPhase("booting");
     setBootSteps(freshSteps());
@@ -483,6 +598,7 @@ export function useAxiom() {
         setModels((known) => known.map((m) => (m.name === selected.name ? { ...m, ...selected } : m)));
         void loadModelDetail(selected.name);
         setStep("select", "ok", selected.displayName);
+        if (cfg.warmup_model) trackWarmup(selected.name);
         if (cfg.model && !preferred) {
           notify(`Модель ${cfg.model} не найдена в Ollama — выбрана ${selected.displayName}`, "error");
         }
@@ -571,6 +687,7 @@ export function useAxiom() {
     setStatusText(null);
     setLiveState(metrics.state);
     setLastMetrics(metrics);
+    notifyAnswerReady(metrics);
     void refreshChats();
   }
 
@@ -909,6 +1026,50 @@ export function useAxiom() {
     }
   }
 
+  // --------------------------------------------- sidebar search / organisation
+  /** Full-text search over stored messages (debounced by the sidebar query). */
+  async function searchChats(query: string) {
+    const token = ++searchSeqRef.current;
+    try {
+      const data = await request<{ hits: ChatHit[] }>("search_chats", { query });
+      if (searchSeqRef.current !== token) return; // a newer query already won
+      const map: Record<string, string> = {};
+      for (const hit of data.hits ?? []) map[hit.id] = hit.snippet;
+      setChatHits(map);
+    } catch {
+      /* the core may be restarting — the previous hits stay visible */
+    }
+  }
+
+  /** Pin/unpin a chat to the top of the sidebar (persisted in history). */
+  async function pinChat(id: string, pinned?: boolean) {
+    const next = pinned ?? !(chats.find((c) => c.id === id)?.pinned ?? false);
+    try {
+      const res = await request<{ ok: boolean }>("chat_meta", { id, pin: next });
+      if (!res.ok) {
+        notify("Не удалось закрепить разговор", "error");
+        return;
+      }
+      setChats((list) => list.map((c) => (c.id === id ? { ...c, pinned: next } : c)));
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  /** File a chat under a sidebar folder (null = no folder). */
+  async function setChatFolder(id: string, folder: string | null) {
+    try {
+      const res = await request<{ ok: boolean }>("chat_meta", { id, folder });
+      if (!res.ok) {
+        notify("Не удалось изменить папку разговора", "error");
+        return;
+      }
+      setChats((list) => list.map((c) => (c.id === id ? { ...c, folder } : c)));
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
   // ---------------------------------------------------------- model actions
   async function refreshModels(): Promise<ModelInfo[]> {
     setModelsLoading(true);
@@ -949,6 +1110,7 @@ export function useAxiom() {
       setActiveModel(model.name);
       setModels((list) => list.map((m) => (m.name === model.name ? { ...m, ...model } : m)));
       void loadModelDetail(model.name);
+      if (config?.warmup_model) trackWarmup(model.name);
       if (!silent) notify(`Активная модель: ${model.displayName}`, "ok");
       return true;
     } catch (err) {
@@ -958,6 +1120,31 @@ export function useAxiom() {
     } finally {
       setSwitchingModel(null);
     }
+  }
+
+  // ------------------------------------------------------- model warm-up UI
+  /** Watch the real residency of `name` (Ollama /api/ps) until the weights are in memory. */
+  function trackWarmup(name: string) {
+    const token = ++warmupTokenRef.current;
+    setWarming(true);
+    void (async () => {
+      try {
+        // The core warms the model in the background; `models` reports the
+        // truth via /api/ps — poll until it is resident (≤5 minutes).
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          if (warmupTokenRef.current !== token) return;
+          const list = await request<ModelInfo[]>("models");
+          if (warmupTokenRef.current !== token) return;
+          setModels(list);
+          if (list.find((m) => m.name === name)?.loaded) return;
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+      } catch {
+        /* the core may be restarting — the indicator simply turns off */
+      } finally {
+        if (warmupTokenRef.current === token) setWarming(false);
+      }
+    })();
   }
 
   /** Apply a new Ollama URL and re-probe everything (real reconnect). */
@@ -1088,6 +1275,20 @@ export function useAxiom() {
     }
   }
 
+  async function loadProviders() {
+    setProviderLoading(true);
+    try {
+      setProviderRows(await request<ProviderRow[]>("providers"));
+    } catch (err) { notify(errorText(err), "error"); }
+    finally { setProviderLoading(false); }
+  }
+  async function providerTest(id: string) { try { const status = await request<string>("provider_test", { provider_id: id }); notify(`${id}: ${status}`, status === "error" ? "error" : "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
+  async function providerSaveKey(id: string, apiKey: string) { try { await request("provider_set_key", { provider_id: id, api_key: apiKey }); notify(`Ключ ${id} сохранён локально`, "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
+  async function providerSetBaseUrl(id: string, baseUrl: string) { try { await request("provider_set_base_url", { provider_id: id, base_url: baseUrl }); notify(`Endpoint ${id} сохранён`, "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
+  async function providerDiscover(id: string) { setProviderLoading(true); try { setProviderModels(await request<ProviderModelRow[]>("provider_discover", { provider_id: id })); notify(`Модели ${id} обновлены`, "ok"); } catch (err) { notify(errorText(err), "error"); } finally { setProviderLoading(false); } }
+  async function providerPickModel(providerId: string, model: string) { try { await request("provider_pick_model", { provider_id: providerId, model }); notify(`Маршрут: ${providerId}/${model}`, "ok"); } catch (err) { notify(errorText(err), "error"); } }
+  async function loadHarness() { try { setAgents(await request<AgentRow[]>("agents")); setProfiles(await request<{ active: string; items: { id: string; name: string; prompt: string }[] }>("profiles")); setTrajectory(await request<TrajectoryViewer>("trajectory")); } catch (err) { notify(errorText(err), "error"); } }
+
   function focusComposer() {
     composerRef.current?.focus();
   }
@@ -1142,6 +1343,25 @@ export function useAxiom() {
         return true;
       case "/settings":
         openSettings("general");
+        return true;
+      case "/providers":
+        openSettings("providers");
+        await loadProviders();
+        return true;
+      case "/permissions":
+        openSettings("tools");
+        return true;
+      case "/profiles":
+        openOverlay("harness");
+        await loadHarness();
+        return true;
+      case "/trajectory":
+        openOverlay("harness");
+        await loadHarness();
+        return true;
+      case "/agents":
+        openOverlay("harness");
+        await loadHarness();
         return true;
       case "/search": {
         if (!args) {
@@ -1320,6 +1540,24 @@ export function useAxiom() {
     }
   }
 
+  /** Apply a ```diff block from an answer to a workspace file (§17). */
+  async function applyPatch(path: string, patch: string): Promise<boolean> {
+    try {
+      const res = await request<{ ok: boolean; error?: string; path?: string }>("apply_patch", { path, patch });
+      if (!res.ok) {
+        notify(res.error ?? "Не удалось применить патч", "error");
+        return false;
+      }
+      notify(`Файл обновлён: ${res.path ?? path}`, "ok");
+      if (openFile?.path === path) void openWorkspaceFile(path);
+      void loadGit(); // the file may now show up as modified
+      return true;
+    } catch (err) {
+      notify(errorText(err), "error");
+      return false;
+    }
+  }
+
   async function runTerminal(command: string, confirmed = false) {
     try {
       const result = await request<TerminalResult>("run_terminal", { command, confirmed });
@@ -1341,6 +1579,53 @@ export function useAxiom() {
     const cmd = pendingTerm;
     setPendingTerm(null);
     if (allow && cmd) await runTerminal(cmd, true);
+  }
+
+  // ---------------------------------------------- interactive shell session
+  async function startShell() {
+    try {
+      const res = await request<{ running: boolean; output: string }>("shell_start", {});
+      setShellRunning(res.running);
+      setShellOutput(res.output ?? "");
+      if (!res.running) notify("Терминал не запустился", "error");
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  async function writeShell(line: string) {
+    try {
+      const res = await request<{ running: boolean; ok: boolean }>("shell_write", { line });
+      setShellRunning(res.running);
+      if (res.ok) {
+        await pollShell();
+      } else {
+        notify("Не удалось отправить команду в терминал", "error");
+      }
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+
+  /** Drain the shell transcript (the backend returns the whole buffer). */
+  async function pollShell() {
+    try {
+      const res = await request<{ running: boolean; output: string }>("shell_read", {});
+      setShellRunning(res.running);
+      setShellOutput(res.output ?? "");
+    } catch {
+      /* the core may be restarting — keep the last output on screen */
+    }
+  }
+
+  async function stopShell() {
+    try {
+      const res = await request<{ running: boolean; output: string }>("shell_stop", {});
+      setShellRunning(res.running);
+      setShellOutput(res.output ?? "");
+    } catch {
+      setShellRunning(false);
+    }
   }
 
   const accessLabel =
@@ -1366,8 +1651,22 @@ export function useAxiom() {
   const filteredChats = useMemo(() => {
     const query = chatSearch.trim().toLowerCase();
     if (!query) return chats;
-    return chats.filter((c) => c.title.toLowerCase().includes(query));
-  }, [chats, chatSearch]);
+    // Title matches first; full-text hits (by id) still show with their snippet.
+    return chats.filter(
+      (c) => c.title.toLowerCase().includes(query) || chatHits[c.id] !== undefined,
+    );
+  }, [chats, chatSearch, chatHits]);
+
+  // Debounced full-text search while the sidebar query changes.
+  useEffect(() => {
+    if (!chatSearch.trim()) {
+      setChatHits({});
+      return;
+    }
+    const timer = window.setTimeout(() => void searchChats(chatSearch), 260);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatSearch]);
 
   const context = useMemo(() => {
     const window = modelDetail?.contextLength ?? activeModelInfo?.contextLength ?? null;
@@ -1430,6 +1729,24 @@ export function useAxiom() {
     activeConversation,
     chatSearch,
     setChatSearch,
+    chatHits,
+    pinChat,
+    setChatFolder,
+    applyPatch,
+    gitStage,
+    gitUnstage,
+    gitCommit,
+    gitShowDiff,
+    shellRunning,
+    shellOutput,
+    startShell,
+    writeShell,
+    pollShell,
+    stopShell,
+    warming,
+    paletteOpen,
+    setPaletteOpen,
+    switchBranch,
     messages,
     generating,
     liveState,
@@ -1456,6 +1773,18 @@ export function useAxiom() {
     // config
     config,
     saveConfig,
+    providerRows,
+    providerModels,
+    providerLoading,
+    loadProviders,
+    providerTest,
+    providerSaveKey,
+    providerSetBaseUrl,
+    providerDiscover,
+    providerPickModel,
+    agents,
+    profiles,
+    trajectory,
     // workspace
     workspace,
     tree,

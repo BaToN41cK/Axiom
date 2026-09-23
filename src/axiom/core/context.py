@@ -141,7 +141,7 @@ class ContextManager:
         )
 
         try:
-            if hasattr(summary_model, "__call__"):
+            if callable(summary_model):
                 result = await summary_model(prompt)
                 summary = str(result).strip()
             else:

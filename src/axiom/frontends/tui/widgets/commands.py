@@ -42,6 +42,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("/status", "System status"),
     Command("/permissions", "Permission mode (ask/auto_approve_safe/auto_approve_all)"),
     Command("/profiles", "List / switch system prompt profiles"),
+    Command("/trajectory", "Trajectory viewer: steps, tool calls, tokens/cost"),
+    Command("/providers", "Provider manager: statuses, test connection"),
+    Command("/agents", "Agent registry: roles and assigned models"),
     Command("/exit", "Exit Axiom"),
 )
 

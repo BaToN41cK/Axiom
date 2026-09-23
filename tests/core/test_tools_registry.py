@@ -11,6 +11,48 @@ async def ok_handler(**kwargs) -> ToolResult:
     return ToolResult(name="?", ok=True, content="done")
 
 
+async def test_subset_clones_bound_handler_owner_and_tool_definition():
+    class _Handler:
+        def __init__(self, root: str) -> None:
+            self.root = root
+
+        async def run(self) -> ToolResult:
+            return ToolResult(name="root", ok=True, content=self.root)
+
+    handler = _Handler("original")
+    registry = ToolRegistry()
+    definition = ToolDefinition(name="root", description="root")
+    registry.register(definition, handler.run)
+
+    subset = registry.subset(["root"])
+    cloned_definition = subset.get("root")
+    cloned_handler = subset._tools["root"][1]
+    assert cloned_definition is not definition
+    assert cloned_handler.__self__ is not handler
+    assert cloned_handler.__self__.root == "original"
+    cloned_handler.__self__.root = "request-only"
+    assert handler.root == "original"
+    subset.unregister("root")
+    assert registry.get("root") is definition
+
+
+async def test_subset_clones_terminal_permission_classifier_owner():
+    from axiom.core.tools.terminal import TerminalTool
+
+    terminal = TerminalTool(enabled=True)
+    registry = ToolRegistry()
+    terminal.register(registry)
+    subset = registry.subset(["run_command"])
+    cloned_handler = subset._tools["run_command"][1]
+    cloned_classifier = subset.classifier["run_command"]
+
+    assert cloned_handler.__self__ is cloned_classifier.__self__
+    cloned_classifier.__self__.enabled = False
+    assert registry.classifier["run_command"]("run_command", {"command": "git status"}) \
+        is ToolPermission.ALWAYS
+    assert cloned_classifier("run_command", {"command": "git status"}) is ToolPermission.NEVER
+
+
 async def test_never_permission_tool_is_blocked_and_hidden():
     registry = ToolRegistry()
     registry.register(

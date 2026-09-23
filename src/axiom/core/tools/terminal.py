@@ -56,6 +56,12 @@ class TerminalTool:
     def set_root(self, root: Path) -> None:
         self.root = root.resolve()
 
+    def _permission_for(self, name: str, args: dict) -> ToolPermission:
+        return (
+            ToolPermission.NEVER if not self.enabled
+            else classify_command(str(args.get("command", "")))
+        )
+
     def register(self, registry) -> None:
         definition = ToolDefinition(
             name=RUN_COMMAND_TOOL,
@@ -77,14 +83,7 @@ class TerminalTool:
             },
             permission=ToolPermission.ALWAYS,  # per-call classification below
         )
-        registry.register(
-            definition,
-            self._run,
-            permission_for=lambda name, args: (
-                ToolPermission.NEVER if not self.enabled
-                else classify_command(str(args.get("command", "")))
-            ),
-        )
+        registry.register(definition, self._run, permission_for=self._permission_for)
 
     async def _run(self, command: str, timeout: float | None = None) -> ToolResult:
         if not self.enabled:

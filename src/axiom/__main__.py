@@ -8,6 +8,7 @@ The only place in the project where a frontend is selected:
 
 from __future__ import annotations
 
+import json
 import sys
 
 from axiom import __version__
@@ -18,7 +19,7 @@ Usage:
   axiom                     Start the TUI workspace
   axiom --gui               Start the desktop GUI (Tauri app in desktop/)
   axiom --help              Show this help
-  axiom --version           Show the version
+  axiom benchmark --scenarios FILE --repetitions N --output FILE
 """
 
 
@@ -32,6 +33,36 @@ def main(argv: list[str] | None = None) -> int:
     if "--version" in args:
         print(f"AXIOM {__version__}")
         return 0
+
+    if "--benchmark" in args:
+        import asyncio
+
+        from axiom.core.benchmark import BenchmarkRunner, scenarios_from_json
+        from axiom.core.chat import ChatSession
+        from axiom.core.config import Config
+
+        def _arg(name: str, default: str | None = None) -> str | None:
+            try:
+                return args[args.index(name) + 1]
+            except (ValueError, IndexError):
+                return default
+
+        scenario_file = _arg("--scenarios")
+        if not scenario_file:
+            print("benchmark requires --scenarios FILE", file=sys.stderr)
+            return 2
+        repetitions = int(_arg("--repetitions", "3") or "3")
+        output = _arg("--output", "benchmark.json")
+        async def _run() -> None:
+            config = Config.load()
+            report = await BenchmarkRunner(
+                lambda: _session_factory(config), scenarios_from_json(scenario_file),
+                repetitions=repetitions, output=output,
+            ).run()
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        async def _session_factory(config):
+            return ChatSession(config=config)
+        return asyncio.run(_run())
 
     if "--gui" in args:
         from axiom.frontends.gui.main import main as gui_main

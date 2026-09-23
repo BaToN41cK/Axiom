@@ -11,7 +11,7 @@ export interface SlashCommand {
   description: string;
   argumentHint?: string;
   /** Hint shown in the palette for commands that open a panel. */
-  group: "chat" | "models" | "workspace" | "system";
+  group: "chat" | "models" | "workspace" | "system" | "harness";
 }
 
 export const COMMANDS: SlashCommand[] = [
@@ -21,6 +21,11 @@ export const COMMANDS: SlashCommand[] = [
   { name: "/history", description: "История разговоров", group: "chat" },
   { name: "/model", description: "Переключить модель", argumentHint: "[name]", group: "models" },
   { name: "/models", description: "Модели, возможности, состояние", group: "models" },
+  { name: "/permissions", description: "Режим разрешений: ask, auto_approve_safe, auto_approve_all", group: "harness" },
+  { name: "/profiles", description: "Системные prompt-профили", group: "harness" },
+  { name: "/trajectory", description: "Timeline запуска, tools, tokens и timing", group: "harness" },
+  { name: "/providers", description: "Провайдеры, API-ключ, Test и выбор модели", group: "harness" },
+  { name: "/agents", description: "Агенты и назначенные модели", group: "harness" },
   { name: "/context", description: "Контекст: токены, сообщения, файлы", group: "chat" },
   { name: "/search", description: "Веб-поиск и ответ по источникам", argumentHint: "query", group: "workspace" },
   { name: "/tools", description: "Инструменты агента", group: "workspace" },

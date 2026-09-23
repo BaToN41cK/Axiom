@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import {
+  Globe,
   Info,
   Keyboard,
   MessageSquare,
@@ -11,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import type { AxiomConfig } from "../types";
+import type { AxiomConfig, ProviderModelRow, ProviderRow } from "../types";
 import type { SettingsSection } from "../hooks/useAxiom";
 
 interface Props {
@@ -21,12 +22,21 @@ interface Props {
   onClose: () => void;
   onSave: (patch: Partial<AxiomConfig>) => void;
   onRestartCore: () => void;
+  providerRows: ProviderRow[];
+  providerModels: ProviderModelRow[];
+  providerLoading: boolean;
+  onProviderTest: (id: string) => Promise<void>;
+  onProviderSaveKey: (id: string, key: string) => Promise<void>;
+  onProviderSetBaseUrl: (id: string, baseUrl: string) => Promise<void>;
+  onProviderDiscover: (id: string) => Promise<void>;
+  onProviderPickModel: (providerId: string, model: string) => Promise<void>;
 }
 
 const SECTIONS: { key: SettingsSection; label: string; icon: ReactNode }[] = [
   { key: "general", label: "Общие", icon: <Settings2 size={14} strokeWidth={1.8} /> },
   { key: "appearance", label: "Вид", icon: <Sparkles size={14} strokeWidth={1.8} /> },
   { key: "models", label: "Модели", icon: <SlidersHorizontal size={14} strokeWidth={1.8} /> },
+  { key: "providers", label: "Провайдеры", icon: <Globe size={14} strokeWidth={1.8} /> },
   { key: "chat", label: "Чат", icon: <MessageSquare size={14} strokeWidth={1.8} /> },
   { key: "tools", label: "Инструменты", icon: <Wrench size={14} strokeWidth={1.8} /> },
   { key: "shortcuts", label: "Горячие клавиши", icon: <Keyboard size={14} strokeWidth={1.8} /> },
@@ -53,6 +63,14 @@ export default function SettingsModal({
   onClose,
   onSave,
   onRestartCore,
+  providerRows,
+  providerModels,
+  providerLoading,
+  onProviderTest,
+  onProviderSaveKey,
+  onProviderSetBaseUrl,
+  onProviderDiscover,
+  onProviderPickModel,
 }: Props) {
   const [draft, setDraft] = useState<AxiomConfig>(config);
 
@@ -106,6 +124,8 @@ export default function SettingsModal({
       auto_scroll: draft.auto_scroll,
       show_metrics: draft.show_metrics,
       show_context: draft.show_context,
+      permission_mode: draft.permission_mode,
+      router_enabled: draft.router_enabled,
     };
     onSave(patch);
     onClose();
@@ -138,6 +158,7 @@ export default function SettingsModal({
           <div className="settings-content">
             {section === "general" && <GeneralSection draft={draft} set={set} />}
             {section === "models" && <ModelsSection draft={draft} set={set} config={config} onRestartCore={onRestartCore} />}
+            {section === "providers" && <ProvidersSection rows={providerRows} models={providerModels} loading={providerLoading} onTest={onProviderTest} onSaveKey={onProviderSaveKey} onSetBaseUrl={onProviderSetBaseUrl} onDiscover={onProviderDiscover} onPickModel={onProviderPickModel} />}
             {section === "chat" && <ChatSection draft={draft} set={set} />}
             {section === "tools" && <ToolsSection draft={draft} set={set} />}
             {section === "appearance" && <AppearanceSection draft={draft} set={set} />}
@@ -170,6 +191,43 @@ interface SectionProps {
   draft: AxiomConfig;
   set: <K extends keyof AxiomConfig>(key: K, value: AxiomConfig[K]) => void;
 }
+function ProvidersSection({ rows, models, loading, onTest, onSaveKey, onSetBaseUrl, onDiscover, onPickModel }: {
+  rows: ProviderRow[]; models: ProviderModelRow[]; loading: boolean;
+  onTest: (id: string) => Promise<void>; onSaveKey: (id: string, key: string) => Promise<void>;
+  onSetBaseUrl: (id: string, baseUrl: string) => Promise<void>;
+  onDiscover: (id: string) => Promise<void>; onPickModel: (providerId: string, model: string) => Promise<void>;
+}) {
+  const [selected, setSelected] = useState(rows[0]?.id ?? "openai");
+  const [key, setKey] = useState("");
+  const row = rows.find((item) => item.id === selected) ?? rows[0];
+  const providerModels = models.filter((item) => item.provider_id === selected);
+  return <div className="provider-settings">
+    <Row label="Provider" hint="Статус и endpoint берутся из реального ProviderManager">
+      <select value={selected} onChange={(e) => { setSelected(e.target.value); setKey(""); }}>
+        {rows.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.status}</option>)}
+      </select>
+    </Row>
+    <Row label="API key" hint="Ключ сохраняется локально и никогда не возвращается в GUI">
+      <input type="password" value={key} placeholder={row?.configured ? "•••••••• (сохранён)" : "не задан"} onChange={(e) => setKey(e.target.value)} />
+    </Row>
+    <Row label="Base URL" hint="Для OpenAI Compatible укажите endpoint с /v1, например http://localhost:8000/v1">
+      <div className="provider-endpoint"><input value={row?.base_url || ""} placeholder="https://api.example.com/v1" onChange={(e) => { const value = e.target.value; if (row) { row.base_url = value; } }} /><button className="btn ghost" onClick={() => void onSetBaseUrl(selected, row?.base_url || "")}>Сохранить URL</button></div>
+    </Row>
+    <div className="settings-actions">
+      <button className="btn ghost" disabled={!row || loading} onClick={() => void onSaveKey(selected, key)}>Сохранить ключ</button>
+      <button className="btn ghost" disabled={!row || loading} onClick={() => void onTest(selected)}>Test</button>
+      <button className="btn ghost" disabled={!row || loading} onClick={() => void onDiscover(selected)}>Discover models</button>
+    </div>
+    <Row label="Модель маршрута" hint="Выбранная модель будет реально использоваться следующим запросом">
+      <select value="" onChange={(e) => { if (e.target.value) void onPickModel(selected, e.target.value); }}>
+        <option value="">Выберите модель…</option>
+        {providerModels.map((item) => <option key={item.id} value={item.model}>{item.label} · {item.capabilities.join(", ")}</option>)}
+      </select>
+    </Row>
+  </div>;
+}
+
+
 
 function Row({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -372,6 +430,13 @@ function ToolsSection({ draft, set }: SectionProps) {
           value={draft.workspace_tools_enabled}
           onChange={(v) => set("workspace_tools_enabled", v)}
         />
+      </Row>
+      <Row label="Режим разрешений" hint="ask · auto_approve_safe · auto_approve_all">
+        <select value={draft.permission_mode} onChange={(e) => set("permission_mode", e.target.value as AxiomConfig["permission_mode"])}>
+          <option value="ask">Спрашивать каждый раз</option>
+          <option value="auto_approve_safe">Автоматически: безопасные действия</option>
+          <option value="auto_approve_all">Автоматически: все действия</option>
+        </select>
       </Row>
       <Row label="Доступ AI" hint="read_only — только чтение · workspace — внутри проекта · full — весь ПК (осторожно)">
         <select value={draft.access_mode} onChange={(e) => set("access_mode", e.target.value as AxiomConfig["access_mode"])}>

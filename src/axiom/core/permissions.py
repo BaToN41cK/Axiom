@@ -10,7 +10,8 @@ The setting persists between launches via the config file.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
 
@@ -41,7 +42,7 @@ class PermissionManager:
         self,
         config: Config | None = None,
         *,
-        request_callback: Callable[[str, dict[str, Any]], bool] | None = None,
+        request_callback: Callable[[str, dict[str, Any]], bool | Awaitable[bool]] | None = None,
     ) -> None:
         self._config = config or Config.load()
         self._request_callback = request_callback
@@ -73,7 +74,9 @@ class PermissionManager:
 
     # ------------------------------------------------------------------ decision
 
-    def request_callback(self, callback: Callable[[str, dict[str, Any]], bool]) -> None:
+    def request_callback(
+        self, callback: Callable[[str, dict[str, Any]], bool | Awaitable[bool]]
+    ) -> None:
         """Connect a UI callback for user approval dialogs."""
         self._request_callback = callback
 
@@ -108,12 +111,14 @@ class PermissionManager:
 
     async def _ask_user(self, tool_name: str, tool_args: dict[str, Any]) -> bool:
         """Show a permission request to the user, or use cache."""
-        cache_key = f"{tool_name}:{hash(frozenset(tool_args.items())) % 10000}"
+        cache_key = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=repr)}"
         if cache_key in self._session_cache:
             return self._session_cache[cache_key]
 
         if self._request_callback is not None:
             approved = self._request_callback(tool_name, tool_args)
+            if hasattr(approved, "__await__"):
+                approved = await approved
             if approved:
                 self._session_cache[cache_key] = True
                 _LOG.info("Permission granted: %s %s", tool_name, tool_args)

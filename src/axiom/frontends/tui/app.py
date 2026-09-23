@@ -30,18 +30,25 @@ from axiom.core.events import (
     ToolResultEvent,
 )
 from axiom.core.models import ModelRegistry
+from axiom.core.permissions import PermissionMode
 from axiom.core.state import GenerationState
 from axiom.core.tools.web_search import FETCH_URL_TOOL, WEB_SEARCH_TOOL
 from axiom.frontends.tui.widgets.commands import COMMANDS, find_command
 from axiom.frontends.tui.widgets.header import HeaderBar, StatusBar
 from axiom.frontends.tui.widgets.messages import AssistantMessage, ChatView, UserMessage
 from axiom.frontends.tui.widgets.panels import (
+    AgentsPanel,
     HelpPanel,
     HistoryPanel,
     ModelPanel,
+    PermissionsPanel,
     ProfilePanel,
+    ProvidersPanel,
     SettingsPanel,
     StatusPanel,
+    TrajectoryDetailPanel,
+    TrajectoryPanel,
+    agent_rows,
 )
 from axiom.frontends.tui.widgets.prompt import InputBar
 from axiom.frontends.tui.widgets.splash import SplashScreen, StartupStep
@@ -371,13 +378,9 @@ class WorkspaceScreen(Screen):
                 )
             )
         elif name == "/permissions":
-            # Show current permission mode as a notification for now
-            mode = self.session.config.permission_mode
-            self.notify(
-                f"Permission mode: {mode}  "
-                f"(Use /settings to change, or edit ~/.axiom/config.json)",
-                title="Permissions",
-                timeout=5,
+            self.app.push_screen(
+                PermissionsPanel(self.session.permissions.mode.value),
+                callback=self._permissions_chosen,
             )
         elif name == "/profiles":
             self.app.push_screen(
@@ -387,6 +390,31 @@ class WorkspaceScreen(Screen):
                 ),
                 callback=self._profile_chosen,
             )
+        elif name == "/trajectory":
+            self.app.push_screen(
+                TrajectoryPanel(self.session.trajectory.viewer()),
+                callback=self._trajectory_step_chosen,
+            )
+        elif name == "/providers":
+            manager = getattr(self.session, "provider_manager", None)
+            if manager is None:
+                self.notify("Provider layer unavailable.", severity="warning", timeout=4)
+                return
+            self.app.push_screen(
+                ProvidersPanel(
+                    manager.status_rows(),
+                    on_test=manager.test_provider,
+                    on_set_key=self._provider_set_key,
+                    on_discover=self._provider_discover,
+                    on_pick_model=self._provider_pick_model,
+                )
+            )
+        elif name == "/agents":
+            registry = getattr(self.session, "agent_registry", None)
+            if registry is None:
+                self.notify("Agent registry unavailable.", severity="warning", timeout=4)
+                return
+            self.app.push_screen(AgentsPanel(agent_rows(registry.all())))
 
     # ------------------------------------------------------------------ panels
 
@@ -402,6 +430,62 @@ class WorkspaceScreen(Screen):
             return
         self._refresh_model_display()
         self.notify(f"Model switched to {model.display_name}", title="Models", timeout=4)
+
+    def _profile_chosen(self, name: str | None) -> None:
+        """Apply the selected system-prompt profile (``/profiles``)."""
+        if not name:
+            return
+        prompt = self.session.profiles.get(name)
+        if prompt is None or not self.session.profiles.select(name):
+            self.notify(f"Unknown profile: {name}", severity="warning", timeout=4)
+            return
+        # The agent reads ``Config.system_prompt``; keep the real source of
+        # truth in sync so the next turn uses the chosen persona.
+        self.session.config.system_prompt = prompt
+        self.session.config.save()
+        self.notify(f"Profile: {name}", title="Profiles", timeout=4)
+
+    def _trajectory_step_chosen(self, seq: str | None) -> None:
+        """Open the detail view for one trajectory step (Enter in ``/trajectory``)."""
+        if not seq:
+            return
+        try:
+            detail = self.session.trajectory.detail(int(seq))
+        except (TypeError, ValueError):
+            detail = None
+        self.app.push_screen(TrajectoryDetailPanel(detail))
+
+    def _permissions_chosen(self, mode: str | None) -> None:
+        """Apply the mode chosen in ``/permissions`` (the real PermissionManager)."""
+        if not mode:
+            return
+        try:
+            self.session.permissions.mode = PermissionMode(mode)
+        except ValueError:
+            self.notify(f"Unknown permission mode: {mode}", severity="warning", timeout=4)
+            return
+        self.notify(f"Permission mode: {mode}", title="Permissions", timeout=4)
+
+    async def _provider_set_key(self, provider_id: str, api_key: str) -> str:
+        """Store a provider API key locally, then verify it (secret never logged)."""
+        manager = getattr(self.session, "provider_manager", None)
+        if manager is None:
+            return "not_configured"
+        manager.set_key(provider_id, api_key)
+        return await manager.test_provider(provider_id)
+
+    async def _provider_discover(self, provider_id: str) -> list[dict]:
+        """Discover models through the provider API (empty when it fails)."""
+        manager = getattr(self.session, "provider_manager", None)
+        if manager is None:
+            return []
+        return await manager.model_rows(provider_id)
+
+    async def _provider_pick_model(self, provider_id: str, model: str) -> str:
+        """Make the chosen provider model the router's primary target."""
+        self.session.config.router_primary = {"provider_id": provider_id, "model": model}
+        self.session.config.save()
+        return f"Route: {provider_id}/{model}"
 
     def _history_chosen(self, conversation_id: str | None) -> None:
         if not conversation_id:

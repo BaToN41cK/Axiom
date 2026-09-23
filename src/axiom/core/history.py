@@ -22,6 +22,9 @@ class Conversation(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     messages: list[Message] = Field(default_factory=list)
+    #: Sidebar organisation (GUI): pinned to the top / filed under a folder.
+    pinned: bool = False
+    folder: str | None = None
 
     def touch(self) -> None:
         self.updated_at = time.time()
@@ -110,6 +113,69 @@ class HistoryStore:
         except OSError:
             return False
         return True
+
+    def set_meta(
+        self,
+        conversation_id: str,
+        *,
+        pinned: bool | None = None,
+        folder: str | object | None = ...,
+    ) -> bool:
+        """Persist sidebar metadata (``pinned`` / ``folder``).
+
+        ``folder``: ``...`` (Ellipsis) = leave unchanged, ``None`` = clear,
+        any string = set/normalise. Returns False when the chat is gone.
+        """
+        conversation = self.load(conversation_id)
+        if conversation is None:
+            return False
+        if pinned is not None:
+            conversation.pinned = pinned
+        if folder is not ...:
+            clean = " ".join((folder or "").split())[:40] or None
+            conversation.folder = clean
+        try:
+            self.save(conversation)
+        except OSError:
+            return False
+        return True
+
+    def search(self, query: str, limit: int = 30) -> list[dict]:
+        """Full-text search over stored messages (case-insensitive).
+
+        Returns ``{id, title, snippet, updated_at}`` for the newest matching
+        conversations — real content matches, not just title filtering.
+        """
+        needle = query.strip().casefold()
+        if not needle:
+            return []
+        hits: list[dict] = []
+        for conversation in self.list():  # newest first
+            snippet: str | None = None
+            for message in conversation.messages:
+                pos = message.content.casefold().find(needle)
+                if pos < 0:
+                    continue
+                start = max(0, pos - 40)
+                text = " ".join(message.content[start : pos + len(needle) + 80].split())
+                prefix = "…" if start > 0 else ""
+                suffix = "…" if pos + len(needle) + 80 < len(message.content) else ""
+                snippet = f"{prefix}{text}{suffix}"
+                break
+            if snippet is None and needle in conversation.title.casefold():
+                snippet = conversation.title
+            if snippet is not None:
+                hits.append(
+                    {
+                        "id": conversation.id,
+                        "title": conversation.title,
+                        "snippet": snippet,
+                        "updated_at": conversation.updated_at,
+                    }
+                )
+            if len(hits) >= limit:
+                break
+        return hits
 
     def show(self, conversation_id: str) -> str | None:
         """Raw JSON of one conversation — the ``show`` half of list/show/rm."""

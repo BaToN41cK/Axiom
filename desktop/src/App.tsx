@@ -141,6 +141,14 @@ export default function App() {
             onClose={() => s.setSettingsOpen(false)}
             onSave={s.saveConfig}
             onRestartCore={s.restartCore}
+           providerRows={s.providerRows}
+           providerModels={s.providerModels}
+           providerLoading={s.providerLoading}
+           onProviderTest={s.providerTest}
+           onProviderSaveKey={s.providerSaveKey}
+           onProviderSetBaseUrl={s.providerSetBaseUrl}
+           onProviderDiscover={s.providerDiscover}
+           onProviderPickModel={s.providerPickModel}
           />
         )}
         {toasts}
@@ -284,6 +292,14 @@ export default function App() {
           onClose={() => s.setSettingsOpen(false)}
           onSave={s.saveConfig}
           onRestartCore={s.restartCore}
+           providerRows={s.providerRows}
+           providerModels={s.providerModels}
+           providerLoading={s.providerLoading}
+           onProviderTest={s.providerTest}
+           onProviderSaveKey={s.providerSaveKey}
+           onProviderDiscover={s.providerDiscover}
+           onProviderSetBaseUrl={s.providerSetBaseUrl}
+           onProviderPickModel={s.providerPickModel}
         />
       )}
 
@@ -297,6 +313,9 @@ export default function App() {
         tools={s.tools}
         toolsError={s.toolsError}
         onReload={() => void s.loadStatus()}
+        agents={s.agents}
+        providers={s.providerRows}
+        trajectory={s.trajectory}
       />
 
       {toasts}

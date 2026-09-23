@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, Globe, Info, Loader2, RefreshCw, X, Wrench } from "lucide-react";
-import type { ModelInfo, StatusReport, ToolInfo } from "../types";
+import type { AgentRow, ModelInfo, ProviderRow, StatusReport, ToolInfo, TrajectoryViewer } from "../types";
 import { SHORTCUTS, COMMANDS } from "../lib/commands";
 import { formatCount, formatDuration, formatBytes } from "../lib/format";
 import type { Overlay } from "../hooks/useAxiom";
@@ -25,6 +25,9 @@ interface Props {
   tools: ToolInfo[] | null;
   toolsError: string | null;
   onReload: () => void;
+  agents: AgentRow[];
+  providers: ProviderRow[];
+  trajectory: TrajectoryViewer | null;
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -40,7 +43,7 @@ const STATE_LABELS: Record<string, string> = {
 };
 
 export default function OverlayPanel(props: Props) {
-  const { overlay, onClose, model, context, status, statusError, tools, toolsError, onReload } = props;
+  const { overlay, onClose, model, context, status, statusError, tools, toolsError, onReload, agents, providers, trajectory } = props;
   if (!overlay) return null;
 
   const title =
@@ -50,7 +53,9 @@ export default function OverlayPanel(props: Props) {
         ? "Состояние AXIOM"
         : overlay === "tools"
           ? "Инструменты агента"
-          : "Контекст";
+          : overlay === "harness"
+            ? "Harness"
+            : "Контекст";
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -75,6 +80,7 @@ export default function OverlayPanel(props: Props) {
           )}
           {overlay === "tools" && <ToolsBody tools={tools} error={toolsError} model={model} />}
           {overlay === "context" && <ContextBody context={context} model={model} />}
+          {overlay === "harness" && <HarnessBody agents={agents} providers={providers} trajectory={trajectory} />}
         </div>
       </div>
     </div>
@@ -251,6 +257,7 @@ function ContextBody({ context, model }: { context: ContextInfo; model: ModelInf
         <div className="panel-note">
           <Globe size={14} strokeWidth={1.8} />
           <span>Точное потребление токенов появится после первой генерации — AXIOM не выдумывает цифры.</span>
+
         </div>
       )}
       <Row label="Размер модели" value={formatBytes(model?.sizeBytes ?? null) || "—"} />
@@ -258,4 +265,13 @@ function ContextBody({ context, model }: { context: ContextInfo; model: ModelInf
       <Row label="Квантование" value={model?.quantization || "—"} />
     </div>
   );
+}
+
+function HarnessBody({ agents, providers, trajectory }: { agents: AgentRow[]; providers: ProviderRow[]; trajectory: TrajectoryViewer | null }) {
+  return <div className="info-list">
+    <div className="help-section"><div className="help-title">Permissions</div><div className="panel-note">ask · auto_approve_safe · auto_approve_all</div></div>
+    <div className="help-section"><div className="help-title">Providers</div>{providers.map((p) => <div className="info-row" key={p.id}><span className="info-label">{p.label}</span><span className="info-value">{p.status}</span></div>)}</div>
+    <div className="help-section"><div className="help-title">Agents</div>{agents.map((a) => <div className="info-row" key={a.id}><span className="info-label">{a.label}</span><span className="info-value">{a.provider_id}/{a.model || "auto"}</span></div>)}</div>
+    <div className="help-section"><div className="help-title">Trajectory</div>{(trajectory?.lines ?? []).slice(-30).map((e) => <div className="info-row" key={e.seq}><span className="info-label">{e.time} · {e.kind}</span><span className="info-value">{e.summary}</span></div>)}</div>
+  </div>;
 }
