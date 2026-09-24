@@ -672,6 +672,7 @@ class Agent:
                     pass
             messages = self._build_messages(history, system)
         rounds = 0
+        forced_edit_once = False
         tool_rounds = 0
         tool_total_s = 0.0
         prompt_built_at = time.perf_counter()
@@ -708,6 +709,24 @@ class Agent:
             first_pass = False
 
             if not result.tool_calls:
+                if (not forced_edit_once and rounds < self._max_rounds and any(
+                    marker in user_text.lower()
+                    for marker in ("сделай", "доработа", "улучш", "реализуй", "исправ", "добавь", "измени")
+                )):
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "The user requested a project change. Do not describe a plan. "
+                                "Use edit_file or write_file now. First read the real target file; "
+                                "never invent a path. If a path does not exist, use list_files or "
+                                "search_files and recover from that result."
+                            ),
+                        }
+                    )
+                    rounds += 1
+                    forced_edit_once = True
+                    continue
                 break
             if rounds >= self._max_rounds:
                 break
@@ -717,18 +736,23 @@ class Agent:
                 messages.append({"role": "assistant", "content": result.content})
             for call in result.tool_calls:
                 tool_block = ""
+                tool_error = ""
                 tool_call_started = time.perf_counter()
                 async for event in self._execute_tool(call):
-                    if isinstance(event, ToolResultEvent) and event.ok:
-                        tool_block = event.content
+                    if isinstance(event, ToolResultEvent):
+                        if event.ok:
+                            tool_block = event.content
+                        else:
+                            tool_error = event.error or "Tool failed"
                     yield event
                 tool_total_s += time.perf_counter() - tool_call_started
                 tool_rounds += 1
-                if tool_block:
+                if tool_block or tool_error:
                     messages.append(
                         {
                             "role": "system",
-                            "content": f"Tool result ({call.name}):\n{tool_block}",
+                            "content": f"Tool result ({call.name}):\n"
+                                       f"{tool_block or 'ERROR: ' + tool_error}",
                         }
                     )
 

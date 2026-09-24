@@ -123,6 +123,10 @@ function errorText(err: unknown): string {
   return text.replace(/^Error:\s*/, "");
 }
 
+function activeProviderLabel(name: string, providerId: string): string {
+  return providerId === "ollama" ? name : `${providerId}/${name}`;
+}
+
 /** Match a model by exact name, then by display label, then by substring. */
 export function resolveModel(models: ModelInfo[], needle: string): ModelInfo | null {
   const query = needle.trim().toLowerCase();
@@ -200,6 +204,7 @@ export function useAxiom() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [activeModelProvider, setActiveModelProvider] = useState("ollama");
   const [modelDetail, setModelDetail] = useState<ModelInfo | null>(null);
   const [switchingModel, setSwitchingModel] = useState<string | null>(null);
   const [modelMenuSignal, setModelMenuSignal] = useState(0);
@@ -591,14 +596,22 @@ export function useAxiom() {
       } else {
         setStep("select", "running");
         current = "select";
-        const preferred = cfg.model ? list.find((m) => m.name === cfg.model) : null;
-        const chosen = preferred ?? list[0];
-        const selected = await request<ModelInfo>("set_model", { name: chosen.name });
+        const configuredRoute = cfg.router_primary;
+        const routeModel = configuredRoute
+          ? list.find((m) => m.name === configuredRoute.model && (m.providerId ?? "ollama") === configuredRoute.provider_id)
+          : null;
+        const preferred = cfg.model ? list.find((m) => m.name === cfg.model && (m.providerId ?? "ollama") === "ollama") : null;
+        const chosen = routeModel ?? preferred ?? list.find((m) => (m.providerId ?? "ollama") === "ollama") ?? list[0];
+        const selected = await request<ModelInfo>("set_model", { name: chosen.name, providerId: chosen.providerId ?? "ollama" });
+        setActiveModelProvider(selected.providerId ?? "ollama");
         setActiveModel(selected.name);
-        setModels((known) => known.map((m) => (m.name === selected.name ? { ...m, ...selected } : m)));
+        setModels((known) => known.map((m) => {
+          const same = m.name === selected.name && (m.providerId ?? "ollama") === (selected.providerId ?? "ollama");
+          return same ? { ...m, ...selected } : m;
+        }));
         void loadModelDetail(selected.name);
         setStep("select", "ok", selected.displayName);
-        if (cfg.warmup_model) trackWarmup(selected.name);
+        if (cfg.warmup_model && (selected.providerId ?? "ollama") === "ollama") trackWarmup(selected.name);
         if (cfg.model && !preferred) {
           notify(`Модель ${cfg.model} не найдена в Ollama — выбрана ${selected.displayName}`, "error");
         }
@@ -632,8 +645,16 @@ export function useAxiom() {
           void refreshModels()
             .then((fresh) => {
               if (fresh.length === 0) return;
-              const preferred = cfg.model ? fresh.find((m) => m.name === cfg.model) : null;
-              void selectModel((preferred ?? fresh[0]).name, true);
+              const configured = cfg.router_primary;
+              const preferred = configured
+                ? fresh.find((m) => m.name === configured.model
+                  && (m.providerId ?? "ollama") === configured.provider_id)
+                : cfg.model
+                  ? fresh.find((m) => m.name === cfg.model && (m.providerId ?? "ollama") === "ollama")
+                  : null;
+              const fallback = fresh.find((m) => (m.providerId ?? "ollama") === "ollama") ?? fresh[0];
+              const chosen = preferred ?? fallback;
+              void selectModel(chosen.name, chosen.providerId ?? "ollama", true);
             })
             .catch(() => {});
         }, 3000);
@@ -1080,13 +1101,21 @@ export function useAxiom() {
       // An empty list is a normal state (API providers are coming) — never an
       // error banner; real transport failures still land in the catch below.
       // A model can disappear from Ollama while AXIOM is running: adapt for real.
-      if (activeModel && !list.some((m) => m.name === activeModel)) {
-        const fallback = list[0];
+      const activeExists = list.some(
+        (m) => m.name === activeModel
+          && (m.providerId ?? "ollama") === activeModelProvider,
+      );
+      if (activeModel && !activeExists) {
+        const fallback = list.find((m) => (m.providerId ?? "ollama") === activeModelProvider)
+          ?? list.find((m) => (m.providerId ?? "ollama") === "ollama")
+          ?? list[0];
         if (fallback) {
-          notify(`Модель ${activeModel} больше не доступна — выбрана ${fallback.displayName}`, "error");
-          await selectModel(fallback.name, true);
+          const fallbackProvider = fallback.providerId ?? "ollama";
+          notify(`Модель ${activeProviderLabel(activeModel, activeModelProvider)} больше не доступна — выбрана ${fallback.displayName}`, "error");
+          await selectModel(fallback.name, fallbackProvider);
         } else {
           setActiveModel(null);
+          setActiveModelProvider("ollama");
         }
       }
       return list;
@@ -1098,19 +1127,27 @@ export function useAxiom() {
     }
   }
 
-  async function selectModel(name: string, silent = false): Promise<boolean> {
+  async function selectModel(name: string, providerId: string | boolean = "ollama", silent = false): Promise<boolean> {
+    if (typeof providerId === "boolean") {
+      silent = providerId;
+      providerId = "ollama";
+    }
     if (generatingRef.current) {
       notify("Нельзя переключить модель во время генерации — остановите её (Esc)", "error");
       return false;
     }
-    if (name === activeModel) return true;
-    setSwitchingModel(name);
+    if (name === activeModel && providerId === activeModelProvider) return true;
+    setSwitchingModel(`${providerId}/${name}`);
     try {
-      const model = await request<ModelInfo>("set_model", { name });
+      const model = await request<ModelInfo>("set_model", { name, providerId });
       setActiveModel(model.name);
-      setModels((list) => list.map((m) => (m.name === model.name ? { ...m, ...model } : m)));
+      setActiveModelProvider(model.providerId ?? providerId);
+      setModels((list) => list.map((m) => {
+        const same = m.name === model.name && (m.providerId ?? "ollama") === (model.providerId ?? "ollama");
+        return same ? { ...m, ...model } : m;
+      }));
       void loadModelDetail(model.name);
-      if (config?.warmup_model) trackWarmup(model.name);
+      if (providerId === "ollama" && config?.warmup_model) trackWarmup(name);
       if (!silent) notify(`Активная модель: ${model.displayName}`, "ok");
       return true;
     } catch (err) {
@@ -1286,7 +1323,16 @@ export function useAxiom() {
   async function providerSaveKey(id: string, apiKey: string) { try { await request("provider_set_key", { provider_id: id, api_key: apiKey }); notify(`Ключ ${id} сохранён локально`, "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
   async function providerSetBaseUrl(id: string, baseUrl: string) { try { await request("provider_set_base_url", { provider_id: id, base_url: baseUrl }); notify(`Endpoint ${id} сохранён`, "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
   async function providerDiscover(id: string) { setProviderLoading(true); try { setProviderModels(await request<ProviderModelRow[]>("provider_discover", { provider_id: id })); notify(`Модели ${id} обновлены`, "ok"); } catch (err) { notify(errorText(err), "error"); } finally { setProviderLoading(false); } }
-  async function providerPickModel(providerId: string, model: string) { try { await request("provider_pick_model", { provider_id: providerId, model }); notify(`Маршрут: ${providerId}/${model}`, "ok"); } catch (err) { notify(errorText(err), "error"); } }
+  async function providerPickModel(providerId: string, model: string) {
+    try {
+      await request("provider_pick_model", { provider_id: providerId, model });
+      const selected = await request<ModelInfo>("set_model", { name: model, provider_id: providerId });
+      setActiveModel(selected.name);
+      setActiveModelProvider(selected.providerId ?? providerId);
+      await refreshModels();
+      notify(`Маршрут: ${providerId}/${model}`, "ok");
+    } catch (err) { notify(errorText(err), "error"); }
+  }
   async function loadHarness() { try { setAgents(await request<AgentRow[]>("agents")); setProfiles(await request<{ active: string; items: { id: string; name: string; prompt: string }[] }>("profiles")); setTrajectory(await request<TrajectoryViewer>("trajectory")); } catch (err) { notify(errorText(err), "error"); } }
 
   function focusComposer() {
@@ -1326,10 +1372,10 @@ export function useAxiom() {
         }
         const match = resolveModel(models, args);
         if (!match) {
-          notify(`Модель «${args}» не найдена в Ollama`, "error");
+          notify(`Модель «${args}» не найдена в Ollama или среди подключённых провайдеров`, "error");
           return true;
         }
-        await selectModel(match.name);
+        await selectModel(match.name, match.providerId ?? "ollama");
         return true;
       }
       case "/context":
@@ -1639,8 +1685,9 @@ export function useAxiom() {
 
   // ------------------------------------------------------------- derived state
   const activeModelInfo = useMemo(
-    () => models.find((m) => m.name === activeModel) ?? null,
-    [models, activeModel],
+    () => models.find((m) => m.name === activeModel
+      && (m.providerId ?? "ollama") === activeModelProvider) ?? null,
+    [models, activeModel, activeModelProvider],
   );
 
   const activeConversation = useMemo(
@@ -1716,6 +1763,7 @@ export function useAxiom() {
     modelsLoading,
     modelsError,
     activeModel,
+    activeModelProvider,
     activeModelInfo,
     modelDetail,
     switchingModel,

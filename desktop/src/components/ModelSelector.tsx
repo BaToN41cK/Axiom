@@ -11,7 +11,7 @@ interface Props {
   switching: string | null;
   disabled: boolean;
   openSignal: number;
-  onSelect: (name: string) => void;
+  onSelect: (name: string, providerId?: string) => void;
   onRefresh: () => void;
 }
 
@@ -59,8 +59,8 @@ export default function ModelSelector(props: Props) {
     setCursor(index >= 0 ? index : 0);
   }, [open, items, active?.name]);
 
-  const choose = (name: string) => {
-    onSelect(name);
+  const choose = (name: string, providerId = "ollama") => {
+    onSelect(name, providerId);
     setOpen(false);
   };
 
@@ -90,7 +90,7 @@ export default function ModelSelector(props: Props) {
     } else if (event.key === "Enter") {
       event.preventDefault();
       const target = items[cursor];
-      if (target) choose(target.name);
+      if (target) choose(target.name, target.providerId ?? "ollama");
     }
   };
 
@@ -102,7 +102,7 @@ export default function ModelSelector(props: Props) {
           setOpen((v) => !v);
           if (!open) onRefresh();
         }}
-        title={active ? `${active.name} — сменить модель` : "Выбрать модель"}
+        title={active ? `${active.providerId ?? "ollama"} · ${active.name} — сменить модель` : "Выбрать модель"}
         aria-haspopup="listbox"
         aria-expanded={open}
       >
@@ -142,16 +142,19 @@ export default function ModelSelector(props: Props) {
               </div>
             )}
             {items.map((model, index) => {
-              const isActive = model.name === active?.name;
-              const isSwitching = switching === model.name;
+              const providerId = model.providerId ?? "ollama";
+              const isExternal = providerId !== "ollama";
+              const isActive = model.name === active?.name && providerId === (active.providerId ?? "ollama");
+              const switchKey = `${providerId}/${model.name}`;
+              const isSwitching = switching === switchKey || (!isExternal && switching === model.name);
               return (
                 <button
-                  key={model.name}
+                  key={switchKey}
                   role="option"
                   aria-selected={isActive}
                   className={"model-item" + (isActive ? " active" : "") + (index === cursor ? " cursor" : "")}
                   onMouseEnter={() => setCursor(index)}
-                  onClick={() => choose(model.name)}
+                  onClick={() => choose(model.name, providerId)}
                 >
                   <span className={"model-radio" + (isActive ? " on" : "")}>
                     {isSwitching ? (
@@ -165,7 +168,7 @@ export default function ModelSelector(props: Props) {
                       <span className="model-item-name">{model.displayName}</span>
                       <span className="model-item-state">
                         <span className={"dot" + (model.loaded ? " on" : "")} />
-                        {model.loaded ? "Local • Ready" : "Local"}
+                        {isExternal ? `${providerId} · API` : model.loaded ? "Ollama · Ready" : "Ollama"}
                       </span>
                     </span>
                     <span className="model-item-sub">{describe(model)}</span>

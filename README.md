@@ -13,6 +13,8 @@ AXIOM — не «ещё один чат в терминале». Это набл
 **модель → инструмент → результат → проверка → ответ**, с сохранением истории,
 траекторий, разрешений и метрик.
 
+![Gui Panel](assets/Gui_Panel.png)
+
 ## Зачем проект
 
 - запускать модели локально и сохранять приватность рабочего контекста;
@@ -23,10 +25,11 @@ AXIOM — не «ещё один чат в терминале». Это набл
 
 ## Текущее состояние
 
-Основной полностью рабочий путь сегодня — **локальный Ollama + TUI/GUI**. В ядре
-уже присутствуют расширяемые слои Harness: provider adapters, model/agent/tool
-registries, orchestrator, trajectory store, context engine, sandbox, skills, router,
-verification, MCP/plugin contracts, project memory и performance metrics.
+Основной путь — локальный Ollama с TUI/GUI; внешние providers подключаются через
+provider manager и unified streaming runtime. В ядре уже присутствуют расширяемые слои
+Harness: provider adapters, model/agent/tool registries, orchestrator, trajectory store,
+context engine, sandbox, skills, router, verification, MCP/plugin contracts, project
+memory и performance metrics.
 
 Это честное разделение статуса:
 
@@ -37,10 +40,10 @@ verification, MCP/plugin contracts, project memory и performance metrics.
 | Filesystem, terminal, Git, project и web tools | Работают в разрешённом workspace |
 | Trajectory, EventBus, agent/tool registries | Работающий core-слой |
 | Skills, sandbox, verification, project memory | Интегрированы в runtime |
-| Provider/model routing | Реализован router; основной chat path по умолчанию остаётся Ollama |
-| Внешние providers и MCP-серверы | Адаптеры/контракты готовы; нужны реальные серверы и live-проверка |
+| Provider/model routing | Реализован unified runtime для Ollama и внешних providers; fallback и streaming подключены |
+| Внешние providers и MCP-серверы | Provider adapters и live OpenAI-compatible routing работают; live MCP ecosystem требует отдельной проверки |
 | Community plugins и Code/PTC | Расширяемые core API; UI/CLI и live ecosystem в развитии |
-| Performance Benchmark Engine | Сбор реальных метрик интегрирован; полный headless benchmark runner ещё развивается |
+| Performance Benchmark Engine | Метрики, cold/warm runner, repetitions и JSON export реализованы; live сравнения зависят от среды |
 
 Подробности изменений находятся в [CHANGELOG.md](CHANGELOG.md).
 

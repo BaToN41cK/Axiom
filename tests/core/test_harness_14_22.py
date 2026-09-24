@@ -321,6 +321,107 @@ async def test_chat_session_harness_objects_ready(tmp_path, monkeypatch):
     assert loaded is not None and len(loaded.events) == 1
 
 
+async def test_agent_forces_edit_after_plan_and_feeds_tool_errors_to_model():
+    from axiom.core.agent import Agent
+    from axiom.core.config import Config
+    from axiom.core.models import ModelInfo
+    from axiom.core.ollama import StreamChunk, ToolCallRequest
+    from axiom.core.state_machine import GenerationStateMachine
+    from axiom.core.tools.base import ToolDefinition, ToolPermission, ToolResult
+    from axiom.core.tools.registry import ToolRegistry
+
+    seen_messages: list[list[dict]] = []
+    calls = 0
+
+    async def read_missing(**kwargs):
+        return ToolResult(name="read_file", ok=False, error="No such file: missing.py")
+
+    async def edit_file(**kwargs):
+        return ToolResult(name="edit_file", ok=True, content="edited")
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(name="read_file", description="read", permission=ToolPermission.ALWAYS),
+        read_missing,
+    )
+    registry.register(
+        ToolDefinition(name="edit_file", description="edit", permission=ToolPermission.ALWAYS),
+        edit_file,
+    )
+
+    class _Client:
+        async def chat(self, model, messages, **kwargs):
+            nonlocal calls
+            seen_messages.append(list(messages))
+            calls += 1
+            if calls == 1:
+                yield StreamChunk(content="Сначала изучу проект и составлю план", done=True)
+            elif calls == 2:
+                yield StreamChunk(
+                    tool_calls=[ToolCallRequest(name="edit_file", arguments={
+                        "path": "x.py", "old_text": "a", "new_text": "b",
+                    })],
+                    done=True,
+                )
+            else:
+                yield StreamChunk(content="Готово", done=True)
+
+    agent = Agent(_Client(), config=Config(), registry=registry, machine=GenerationStateMachine())  # type: ignore[arg-type]
+    events = [event async for event in agent.run(
+        [{"role": "user", "content": "сделай fallback между providers в проекте"}],
+        ModelInfo(name="m"),
+    )]
+    assert 2 <= calls <= 3
+    assert any(getattr(event, "type", "") == "tool_call" for event in events)
+    assert any(
+        "Use edit_file or write_file now" in str(message.get("content"))
+        for message in seen_messages[1]
+    )
+
+
+async def test_agent_returns_failed_tool_result_to_next_model_pass():
+    from axiom.core.agent import Agent
+    from axiom.core.config import Config
+    from axiom.core.models import ModelInfo
+    from axiom.core.ollama import StreamChunk, ToolCallRequest
+    from axiom.core.state_machine import GenerationStateMachine
+    from axiom.core.tools.base import ToolDefinition, ToolPermission, ToolResult
+    from axiom.core.tools.registry import ToolRegistry
+
+    calls = 0
+    seen: list[list[dict]] = []
+
+    async def read_missing(**kwargs):
+        return ToolResult(name="read_file", ok=False, error="No such file: missing.py")
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(name="read_file", description="read", permission=ToolPermission.ALWAYS),
+        read_missing,
+    )
+
+    class _Client:
+        async def chat(self, model, messages, **kwargs):
+            nonlocal calls
+            calls += 1
+            seen.append(list(messages))
+            if calls == 1:
+                yield StreamChunk(
+                    tool_calls=[ToolCallRequest(name="read_file", arguments={"path": "missing.py"})],
+                    done=True,
+                )
+            else:
+                yield StreamChunk(content="восстановился после ошибки", done=True)
+
+    agent = Agent(_Client(), config=Config(), registry=registry, machine=GenerationStateMachine())  # type: ignore[arg-type]
+    [event async for event in agent.run(
+        [{"role": "user", "content": "прочитай проект и исправь fallback"}],
+        ModelInfo(name="m"),
+    )]
+    assert calls == 3
+    assert "ERROR: No such file: missing.py" in str(seen[1])
+
+
 def test_should_fallback_reads_real_error_kind():
     from axiom.core.errors import OllamaUnavailableError
     from axiom.core.router import ModelRouter

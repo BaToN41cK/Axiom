@@ -107,6 +107,13 @@ class ChatSession:
         provider: SearchProvider | None = None,
     ) -> None:
         self.config = config or Config.load()
+        # A workspace can disappear between runs (for example, pytest's
+        # temporary project). Never keep Explorer and filesystem tools pointed
+        # at a stale path; use the actual launch directory instead.
+        if self.config.workspace_root:
+            configured_root = Path(self.config.workspace_root).expanduser()
+            if not configured_root.exists() or not configured_root.is_dir():
+                self.config.workspace_root = None
         self.client = client or OllamaClient(
             self.config.ollama_url, keep_alive=self.config.keep_alive
         )

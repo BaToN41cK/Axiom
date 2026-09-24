@@ -39,6 +39,4 @@ Thumbs.db
 .tmp/
 image.png
 desktop/temp-ps.txt
-# Local changelog: keep the working project journal out of the repository.
-CHANGELOG.md
 

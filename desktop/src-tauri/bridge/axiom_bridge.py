@@ -18,11 +18,12 @@ from pathlib import Path
 from axiom.core.chat import ChatSession
 from axiom.core.config import Config
 from axiom.core.events import ChatEvent
+from axiom.core.models import ModelInfo
 
 OUT_LOCK = threading.Lock()
 
 
-def _model_json(m, loaded: bool = False) -> dict:
+def _model_json(m, loaded: bool = False, provider_id: str = "ollama", source: str = "ollama") -> dict:
     return {
         "name": m.name,
         "displayName": m.display_name,
@@ -35,14 +36,25 @@ def _model_json(m, loaded: bool = False) -> dict:
         "contextLength": m.context_length,
         "numCtx": m.num_ctx,
         "loaded": loaded,
+        "providerId": provider_id,
+        "source": source,
     }
 
 
 async def _models_json(session: ChatSession) -> list[dict]:
-    """Models plus their real in-memory state from ``/api/ps``."""
+    """Local Ollama models plus the active external route."""
     models = await session.refresh_models()
     loaded = await session.registry.running_names()
-    return [_model_json(m, loaded=m.name in loaded) for m in models]
+    rows = [_model_json(m, loaded=m.name in loaded) for m in models]
+    target = session.router.config.primary
+    if target is not None and target.provider_id != "ollama" and target.model:
+        rows.append({
+            "name": target.model, "displayName": target.model, "sizeGb": 0,
+            "sizeBytes": 0, "parameterSize": "", "quantization": "", "family": "",
+            "capabilities": [], "contextLength": None, "numCtx": None, "loaded": False,
+            "providerId": target.provider_id, "source": "external",
+        })
+    return rows
 
 
 def _conversation_summary(c) -> dict:
@@ -131,6 +143,22 @@ def _write_line(line: str) -> None:
         sys.stdout.flush()
 
 
+def _active_provider_id(session: ChatSession) -> str:
+    primary = session.router.config.primary
+    return primary.provider_id if primary is not None else "ollama"
+
+
+def _active_model_json(session: ChatSession) -> dict | None:
+    if session.active_model is None:
+        return None
+    provider_id = _active_provider_id(session)
+    return _model_json(
+        session.active_model,
+        provider_id=provider_id,
+        source="ollama" if provider_id == "ollama" else "external",
+    )
+
+
 async def _state_json(session: ChatSession) -> dict:
     return {
         "state": session.state.value if session.state else "idle",
@@ -148,7 +176,7 @@ async def _stream_turn(session: ChatSession, events) -> dict:
         "state": session.state.value,
         "lastMetrics": session.last_metrics or {},
         "conversation": _conversation_summary(session.conversation),
-        "activeModel": _model_json(session.active_model) if session.active_model else None,
+        "activeModel": _active_model_json(session),
     }
 
 
@@ -164,11 +192,19 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         return {"available": available, "version": version, "url": session.client.base_url}
     if cmd == "status":
         state = await _state_json(session)
+        available = await session.client.is_available()
+        version = None
+        if available:
+            try:
+                version = await session.client.version()
+            except Exception:
+                # A transient Ollama failure must not hide an active external route.
+                available = False
         return {
             **state,
             "ollamaUrl": session.client.base_url,
-            "version": await session.client.version() if await session.client.is_available() else None,
-            "activeModel": _model_json(session.active_model) if session.active_model else None,
+            "version": version,
+            "activeModel": _active_model_json(session),
             "historyCount": len(session.history()),
             "configPath": str(type(session.config).path()),
             "busy": session.busy,
@@ -368,6 +404,8 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
             return {"ok": False, "error": "Path is outside the workspace"}
         if target.is_dir():
             return {"ok": False, "error": "Path is a directory"}
+        if not target.exists():
+            return {"ok": False, "error": f"File not found in current workspace: {args.get('path', '')}"}
         try:
             text = target.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -539,12 +577,30 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
             new_terminal.register(session.tools)
         return json.loads(new_cfg.model_dump_json())
     if cmd == "set_model":
-        model = await session.switch_model(args["name"])
-        # Warm the new model in the background; the reply is not delayed.
-        if session.config.warmup_model:
-            session.core_warmup_task = asyncio.create_task(session.warmup_model(model.name))
-        return _model_json(model)
+        # React sends camelCase while Python/TUI callers use snake_case.  Both
+        # are part of the bridge protocol; silently defaulting a missing key to
+        # Ollama used to send external models to /api/show and report a false
+        # "not available in Ollama" error.
+        provider_id = str(args.get("provider_id") or args.get("providerId") or "ollama")
+        name = str(args["name"])
+        if provider_id == "ollama":
+            session.config.router_primary = None
+            model = await session.switch_model(name)
+            if session.config.warmup_model:
+                session.core_warmup_task = asyncio.create_task(session.warmup_model(model.name))
+            return _model_json(model)
+
+        session.config.router_primary = {"provider_id": provider_id, "model": name}
+        session.config.save()
+        session._configure_router_from_config()
+        active = ModelInfo(name=name, capabilities=[])
+        session.active_model = active
+        session.conversation.model = active.name
+        return _model_json(active, provider_id=provider_id, source="external")
     if cmd == "warmup":
+        primary = session.router.config.primary
+        if primary is not None and primary.provider_id != "ollama":
+            return {"warmed": True, "pending": False, "skipped": "external_provider"}
         task = getattr(session, "core_warmup_task", None)
         if task is not None and not task.done():
             return {"warmed": False, "pending": True}

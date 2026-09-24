@@ -168,6 +168,30 @@ def test_unknown_command_is_a_structured_error(bridge: BridgeProcess) -> None:
     assert "Unknown command" in reply["error"]
 
 
+def test_external_model_camel_case_payload_never_uses_ollama(bridge: BridgeProcess) -> None:
+    """The React client uses providerId; external routes must not hit /api/show."""
+    reply = bridge.request(7, "set_model", {
+        "name": "deepseek/deepseek-v4-flash",
+        "providerId": "openai_compatible",
+    })
+    assert reply["ok"] is True
+    assert reply["data"]["name"] == "deepseek/deepseek-v4-flash"
+    assert reply["data"]["providerId"] == "openai_compatible"
+    assert reply["data"]["source"] == "external"
+
+    config = bridge.request(8, "get_config")
+    assert config["data"]["router_primary"] == {
+        "provider_id": "openai_compatible",
+        "model": "deepseek/deepseek-v4-flash",
+    }
+    warmup = bridge.request(9, "warmup", {})
+    assert warmup["ok"] is True
+    assert warmup["data"]["skipped"] == "external_provider"
+    status = bridge.request(10, "status")
+    assert status["data"]["activeModel"]["providerId"] == "openai_compatible"
+    assert status["data"]["activeModel"]["source"] == "external"
+
+
 def test_send_without_ollama_reports_error_event(bridge: BridgeProcess) -> None:
     reply = bridge.request(7, "send", {"text": "hi"})
     # The reply itself is ok (events were streamed); without a live Ollama the

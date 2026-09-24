@@ -57,3 +57,20 @@ async def _scenario(tmp_path: Path) -> None:
 
 def test_project_switching_scenario(tmp_path: Path) -> None:
     asyncio.run(_scenario(tmp_path))
+
+
+
+async def test_chat_drops_missing_configured_workspace(tmp_path, monkeypatch):
+    from axiom.core.chat import ChatSession
+    from axiom.core.config import Config
+    from axiom.core.history import HistoryStore
+
+    monkeypatch.chdir(tmp_path)
+    stale = tmp_path / "gone"
+    cfg = Config(save_history=False, workspace_tools_enabled=True, workspace_root=str(stale))
+    session = ChatSession(config=cfg, history_store=HistoryStore(directory=tmp_path / "history"))
+    assert session.config.workspace_root is None
+    assert session.workspace_root == tmp_path.resolve()
+    result = await session.tools.execute("read_file", {"path": "missing.py"})
+    assert not result.ok
+    assert "missing.py" in (result.error or "")

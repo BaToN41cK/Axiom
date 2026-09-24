@@ -69,6 +69,9 @@ export interface ModelInfo {
   numCtx: number | null;
   /** Ollama reports the model as resident in memory (/api/ps). */
   loaded: boolean;
+  providerId?: string;
+  source?: "ollama" | "external";
+  endpoint?: string;
 }
 
 export interface Conversation {
