@@ -98,6 +98,21 @@ class ToolRegistry:
         """Tool schemas for the Ollama ``tools`` parameter."""
         return [d.schema() for d in self.definitions()]
 
+    def permission_for(self, name: str, arguments: dict | None = None) -> ToolPermission:
+        """Return the effective permission for a tool call.
+
+        Keeping this beside the registry prevents the agent from guessing a
+        tool's safety policy and keeps the policy consistent for all callers.
+        """
+        entry = self._tools.get(name)
+        if entry is None:
+            return ToolPermission.NEVER
+        definition = entry[0]
+        classifier = self.classifier.get(name)
+        if classifier is not None:
+            return classifier(name, arguments or {})
+        return definition.permission
+
     async def execute(
         self, name: str, arguments: dict | None = None, *, approved: bool = False
     ) -> ToolResult:

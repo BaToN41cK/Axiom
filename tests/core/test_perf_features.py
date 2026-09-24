@@ -15,9 +15,7 @@ from axiom.core.history import HistoryStore
 from axiom.core.models import ModelInfo
 from axiom.core.ollama import OllamaClient
 from axiom.core.performance import PerformanceMetrics
-
 from tests.core.test_chat import FakeClient
-
 
 # ---------------------------------------------------------------- think levels
 
@@ -123,7 +121,7 @@ def test_reasoning_traces_stripped_from_context(tmp_path: Path):
         Message(role="assistant", content="ответ", thinking="долгие размышления")
     )
     ctx = session._context_messages()
-    assistant = [m for m in ctx if m["role"] == "assistant"][0]
+    assistant = next(m for m in ctx if m["role"] == "assistant")
     assert assistant["content"] == "ответ"
     assert "thinking" not in assistant
 
@@ -161,7 +159,7 @@ async def test_warmup_sends_minimal_chat_request(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, url, json=None):  # noqa: ARG002
+        async def post(self, url, json=None):
             captured["url"] = url
             captured["json"] = json
             return SimpleResponse()
@@ -188,7 +186,7 @@ async def test_warmup_never_raises_on_transport_error(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, url, json=None):  # noqa: ARG002
+        async def post(self, url, json=None):
             raise httpx.ConnectError("down")
 
     monkeypatch.setattr(OllamaClient, "_client", lambda self, timeout=None: BrokenClient())
@@ -229,7 +227,7 @@ async def test_list_running_parses_ps_response(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url):  # noqa: ARG002
+        async def get(self, url):
             captured["url"] = url
             return PsResponse()
 
@@ -259,7 +257,7 @@ async def test_list_running_bad_shape_returns_empty_list(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def get(self, url):  # noqa: ARG002
+        async def get(self, url):
             return BadResponse()
 
     monkeypatch.setattr(OllamaClient, "_client", lambda self, timeout=None: BadClient())

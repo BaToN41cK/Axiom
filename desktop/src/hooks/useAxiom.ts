@@ -32,6 +32,8 @@ import type {
   LiveMessage,
   ModelInfo,
   ProjectInfo,
+  ProjectSearchResult,
+  WorkspaceFilesResult,
   SendResult,
   StartupReport,
   StatusReport,
@@ -186,6 +188,54 @@ function toolStatusText(name: string, args: Record<string, unknown>): string {
   return toolLabel(name);
 }
 
+/**
+ * Live `/orchestrate` progress (real trajectory steps streamed by the core) →
+ * the status pill text plus an optional line for the growing chat message.
+ * Returns null for event kinds the UI does not render.
+ */
+export function orchestrationProgress(event: {
+  kind: string;
+  actor: string;
+  summary: string;
+}): { status: string; line: string | null } | null {
+  const actor = event.actor || "orchestrator";
+  const summary = event.summary || "";
+  switch (event.kind) {
+    case "orchestration.command":
+      return { status: "Оркестрация: план…", line: null };
+    case "orchestrator.plan":
+      return { status: "Оркестрация: план готов", line: `▸ План: ${summary}` };
+    case "agent.start":
+      return { status: `Оркестрация: ${actor} выполняет задачу…`, line: `▸ **${actor}**: запущен` };
+    case "agent.done":
+      return { status: `Оркестрация: ${actor} готов`, line: `✓ **${actor}**: отчёт получен` };
+    case "agent.failed":
+      return { status: `Оркестрация: ${actor} — ошибка`, line: `✗ **${actor}**: ${summary}` };
+    case "subagent.model":
+      return { status: `Оркестрация: ${actor} → ${summary}`, line: `🔀 **${actor}** → ${summary}` };
+    case "subagent.reasoning":
+      return { status: `Оркестрация: ${actor} — думает…`, line: `💭 **${actor}**: ${summary}` };
+    case "subagent.answer":
+      return { status: `Оркестрация: ${actor} — пишет…`, line: `✍ **${actor}**: ${summary}` };
+    case "subagent.tool.call":
+      return { status: `Оркестрация: ${actor} — ${summary}`, line: null };
+    case "subagent.tool.result":
+      return { status: `Оркестрация: ${actor} — ${summary}`, line: `⚙ ${actor}: ${summary}` };
+    case "orchestrator.review":
+      return { status: "Оркестрация: review…", line: `✎ Review: ${summary}` };
+    case "verification.completed":
+      return { status: "Оркестрация: verification…", line: `◎ Verification: ${summary}` };
+    case "orchestrator.done":
+      return { status: "Оркестрация: завершена", line: "■ Оркестрация завершена" };
+    case "orchestration.cancelled":
+      return { status: "Оркестрация остановлена", line: null };
+    case "orchestration.failed":
+      return { status: "Оркестрация: сбой", line: `✗ Оркестрация: ${summary}` };
+    default:
+      return null;
+  }
+}
+
 export function useAxiom() {
   // ------------------------------------------------------------------- boot
   const [phase, setPhase] = useState<Phase>("booting");
@@ -247,6 +297,12 @@ export function useAxiom() {
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
   const [openFile, setOpenFile] = useState<{ path: string; content: string } | null>(null);
+  const [projectSearch, setProjectSearch] = useState("");
+  const [projectSearchResults, setProjectSearchResults] = useState<ProjectSearchResult>({ query: "", hits: [] });
+  const [projectSearching, setProjectSearching] = useState(false);
+  const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
+  const [lastAction, setLastAction] = useState<{ name: string; detail: string; ok: boolean; durationMs?: number } | null>(null);
+  const [agentTimelineOpen, setAgentTimelineOpen] = useState(true);
   const [termHistory, setTermHistory] = useState<{ command: string; result: TerminalResult }[]>([]);
   const [pendingTerm, setPendingTerm] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<{ ok: boolean; content: string; error: string | null } | null>(null);
@@ -292,6 +348,9 @@ export function useAxiom() {
   const generatingRef = useRef(false);
   const startedAtRef = useRef(0);
   const pendingTextRef = useRef({ content: "", thinking: "" });
+  const orchestrationActiveRef = useRef(false);
+  /** Throttles silent explorer refreshes while workers write files. */
+  const lastTreeSyncRef = useRef(0);
   const rafRef = useRef<number | null>(null);
   const bootedRef = useRef(false);
   /** Tokens that cancel superseded background tasks (warm-up, chat search). */
@@ -360,9 +419,9 @@ export function useAxiom() {
     setBootSteps((steps) => steps.map((step) => (step.id === id ? { ...step, state, detail } : step)));
   }
 
-  async function loadModelDetail(name: string) {
+  async function loadModelDetail(name: string, providerId = "ollama") {
     try {
-      const detail = await request<ModelInfo | null>("model_info", { name });
+      const detail = await request<ModelInfo | null>("model_info", { name, providerId });
       if (detail) setModelDetail(detail);
     } catch {
       setModelDetail(null);
@@ -429,15 +488,15 @@ export function useAxiom() {
     }
   }
 
-  async function loadTree() {
-    setTreeLoading(true);
+  async function loadTree(silent = false) {
+    if (!silent) setTreeLoading(true);
     try {
       const data = await request<{ tree: TreeNode[] }>("workspace_tree", { depth: 3 });
       setTree(data.tree ?? []);
     } catch {
       setTree([]);
     } finally {
-      setTreeLoading(false);
+      if (!silent) setTreeLoading(false);
     }
   }
 
@@ -545,20 +604,35 @@ export function useAxiom() {
       setSidebarOpen(cfg.sidebar_open);
       setSidebarWidth(cfg.sidebar_width);
       if (!probe.available) {
-        setStep("detect", "failed", probe.url);
-        setConnected(false);
-        setBootError({
-          message: "Ollama недоступна",
-          hint: `AXIOM не смог подключиться к ${probe.url}`,
-          url: probe.url,
-        });
-        setPhase("unavailable");
-        return;
+        // API-only setups are valid: the active external route is independent
+        // from Ollama. Keep booting so providers/models/workspace remain usable.
+        const externalRoute = cfg.router_primary;
+        if (!externalRoute || externalRoute.provider_id === "ollama") {
+          setStep("detect", "failed", probe.url);
+          setConnected(false);
+          setBootError({
+            message: "Ollama недоступна",
+            hint: `AXIOM не смог подключиться к ${probe.url}`,
+            url: probe.url,
+          });
+          setPhase("unavailable");
+          return;
+        }
+        setStep("detect", "ok", `внешний provider: ${externalRoute.provider_id}`);
+      } else {
+        setStep("detect", "ok", probe.url);
       }
-      setStep("detect", "ok", probe.url);
 
       setStep("connect", "running");
-      setStep("connect", "ok", probe.version ? `Ollama ${probe.version}` : "соединение установлено");
+      setStep(
+        "connect",
+        "ok",
+        probe.version
+          ? `Ollama ${probe.version}`
+          : probe.available
+            ? "соединение установлено"
+            : "режим внешнего API",
+      );
 
       // The model list and the saved history are independent as well.
       setStep("models", "running");
@@ -609,7 +683,7 @@ export function useAxiom() {
           const same = m.name === selected.name && (m.providerId ?? "ollama") === (selected.providerId ?? "ollama");
           return same ? { ...m, ...selected } : m;
         }));
-        void loadModelDetail(selected.name);
+        void loadModelDetail(selected.name, selected.providerId ?? "ollama");
         setStep("select", "ok", selected.displayName);
         if (cfg.warmup_model && (selected.providerId ?? "ollama") === "ollama") trackWarmup(selected.name);
         if (cfg.model && !preferred) {
@@ -749,6 +823,7 @@ export function useAxiom() {
                 call.state = event.ok ? "ok" : "failed";
                 call.durationMs = event.durationMs;
                 call.error = event.error;
+                setLastAction({ name: event.name, detail: call.detail, ok: event.ok, durationMs: event.durationMs });
               }
             }),
           );
@@ -763,6 +838,35 @@ export function useAxiom() {
         case "status":
           applyStatus(event.state, event.detail);
           break;
+        case "orchestration": {
+          // Live /orchestrate progress: real trajectory steps streamed while
+          // the workers run (the final report replaces this message later).
+          if (!generatingRef.current || !orchestrationActiveRef.current) break;
+          // A worker really created/edited a file — mirror it into the
+          // explorer immediately (throttled + silent, no spinner flicker),
+          // otherwise new files only appear after a core/app restart.
+          if (
+            event.kind === "subagent.tool.result" &&
+            /^(write_file|edit_file|create_directory)\b/.test(event.summary) &&
+            !event.summary.includes("failed") &&
+            Date.now() - lastTreeSyncRef.current > 2500
+          ) {
+            lastTreeSyncRef.current = Date.now();
+            void loadTree(true);
+          }
+          const progress = orchestrationProgress(event);
+          if (!progress) break;
+          setStatusText(progress.status);
+          const line = progress.line;
+          if (line) {
+            setMessages((list) =>
+              updateLive(list, (m) => {
+                m.content = m.content ? `${m.content}\n${line}` : line;
+              }),
+            );
+          }
+          break;
+        }
         case "error":
           setMessages((list) =>
             updateLive(list, (m) => {
@@ -828,6 +932,92 @@ export function useAxiom() {
       }
     } catch (err) {
       failGeneration(err);
+    }
+  }
+
+  async function beginOrchestration(userMessage: LiveMessage, task: string) {
+    if (generatingRef.current) {
+      notify("Генерация уже идёт — сначала остановите её", "error");
+      return;
+    }
+    if (!connected && !activeModel) {
+      notify("Подключите Ollama или внешний provider", "error");
+      return;
+    }
+    beginGeneration();
+    orchestrationActiveRef.current = true;
+    // «Подключается…» было бы неправдой: план и воркеры уже работают.
+    setStatusText("Оркестрация: план…");
+    setMessages((list) => [...list, userMessage, liveAssistant()]);
+    try {
+      const result = await request<{
+        ok?: boolean;
+        error?: string;
+        cancelled?: boolean;
+        results?: { agent?: string; content?: string; error?: string; status?: string; provider_id?: string; model?: string }[];
+        review?: string;
+        approved?: boolean;
+        completed?: boolean;
+        verification?: { ok?: boolean; summary?: string; error?: string };
+        definition_of_done?: string[];
+        review_details?: { issues?: string[]; required_changes?: string[] };
+      }>("orchestrate", { text: task, limit: 5, max_iterations: 3 });
+      if (result.cancelled || result.error === "cancelled") {
+        // Esc / «Остановить» во время оркестрации — это не ошибка.
+        setMessages((list) =>
+          list.map((item) =>
+            item.role === "assistant" && item.streaming
+              ? { ...item, content: "Оркестрация остановлена пользователем.", streaming: false, createdAt: Date.now() }
+              : item,
+          ),
+        );
+        generatingRef.current = false;
+        setGenerating(false);
+        setStatusText(null);
+        setLiveState("idle");
+        notify("Оркестрация остановлена", "info");
+        return;
+      }
+      if (result.ok === false && result.error) {
+        failGeneration(new Error(result.error));
+        return;
+      }
+      const verificationLine = result.verification
+        ? `## Verification\n${result.verification.summary ?? result.verification.error ?? "не запускалась"}`
+        : "## Verification\nне запускалась";
+      const done = result.completed ?? result.approved ?? false;
+      const report = [
+        "## Оркестрация завершена",
+        "",
+        ...(result.results ?? []).map((item) => `- **${item.agent ?? "агент"}** (\`${item.provider_id ?? "?"}${item.model ? `/${item.model}` : ""}\`): ${item.content ?? item.error ?? "нет отчёта"}`),
+        "",
+        `## Reviewer (${result.approved ? "APPROVED" : "REWORK"})\n${result.review ?? "Ответ не получен"}`,
+        ...(((result.review_details?.issues ?? []).length)
+          ? [`Issues: ${(result.review_details?.issues ?? []).join("; ")}`] : []),
+        ...(((result.review_details?.required_changes ?? []).length)
+          ? [`Required: ${(result.review_details?.required_changes ?? []).join("; ")}`] : []),
+        "",
+        verificationLine,
+        "",
+        `## Definition of Done\n${(result.definition_of_done ?? []).map((item) => `- ${item}`).join("\n")}`,
+        done ? "\nГотово. Проверка пройдена." : "\nЕсть замечания reviewer или verification не прошла.",
+      ].join("\n");
+      setMessages((list) => list.map((item) => item.role === "assistant" && item.streaming
+        ? { ...item, content: report, streaming: false, createdAt: Date.now() }
+        : item));
+      generatingRef.current = false;
+      setGenerating(false);
+      setStatusText(null);
+      setLiveState("idle");
+      void refreshChats();
+    } catch (err) {
+      failGeneration(err);
+    } finally {
+      orchestrationActiveRef.current = false;
+      // Workers may have created/edited files: refresh the explorer and the
+      // git panel right away — no core/app restart needed to see them.
+      void loadTree();
+      void loadGit();
     }
   }
 
@@ -1146,13 +1336,14 @@ export function useAxiom() {
         const same = m.name === model.name && (m.providerId ?? "ollama") === (model.providerId ?? "ollama");
         return same ? { ...m, ...model } : m;
       }));
-      void loadModelDetail(model.name);
+      void loadModelDetail(model.name, model.providerId ?? providerId);
       if (providerId === "ollama" && config?.warmup_model) trackWarmup(name);
       if (!silent) notify(`Активная модель: ${model.displayName}`, "ok");
       return true;
     } catch (err) {
-      notify(errorText(err), "error");
-      void refreshModels();
+      const message = errorText(err);
+      setModelsError(message);
+      notify(message, "error");
       return false;
     } finally {
       setSwitchingModel(null);
@@ -1320,18 +1511,23 @@ export function useAxiom() {
     finally { setProviderLoading(false); }
   }
   async function providerTest(id: string) { try { const status = await request<string>("provider_test", { provider_id: id }); notify(`${id}: ${status}`, status === "error" ? "error" : "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
-  async function providerSaveKey(id: string, apiKey: string) { try { await request("provider_set_key", { provider_id: id, api_key: apiKey }); notify(`Ключ ${id} сохранён локально`, "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
-  async function providerSetBaseUrl(id: string, baseUrl: string) { try { await request("provider_set_base_url", { provider_id: id, base_url: baseUrl }); notify(`Endpoint ${id} сохранён`, "ok"); await loadProviders(); } catch (err) { notify(errorText(err), "error"); } }
-  async function providerDiscover(id: string) { setProviderLoading(true); try { setProviderModels(await request<ProviderModelRow[]>("provider_discover", { provider_id: id })); notify(`Модели ${id} обновлены`, "ok"); } catch (err) { notify(errorText(err), "error"); } finally { setProviderLoading(false); } }
-  async function providerPickModel(providerId: string, model: string) {
+  async function providerSaveSettings(id: string, apiKey: string, baseUrl: string) {
     try {
-      await request("provider_pick_model", { provider_id: providerId, model });
-      const selected = await request<ModelInfo>("set_model", { name: model, provider_id: providerId });
-      setActiveModel(selected.name);
-      setActiveModelProvider(selected.providerId ?? providerId);
-      await refreshModels();
-      notify(`Маршрут: ${providerId}/${model}`, "ok");
-    } catch (err) { notify(errorText(err), "error"); }
+      if (apiKey) await request("provider_set_key", { provider_id: id, api_key: apiKey });
+      if (baseUrl) await request("provider_set_base_url", { provider_id: id, base_url: baseUrl });
+      await request("provider_test", { provider_id: id });
+      await loadProviders();
+      await providerDiscover(id);
+    } catch (err) {
+      notify(errorText(err), "error");
+    }
+  }
+  async function providerDiscover(id: string) { setProviderLoading(true); try { setProviderModels(await request<ProviderModelRow[]>("provider_discover", { provider_id: id }));  } catch (err) { notify(errorText(err), "error"); } finally { setProviderLoading(false); } }
+  async function providerPickModel(providerId: string, model: string) {
+    const selected = await selectModel(model, providerId, true);
+    if (!selected) return;
+    await refreshModels();
+    notify(`Маршрут: ${providerId}/${model}`, "ok");
   }
   async function loadHarness() { try { setAgents(await request<AgentRow[]>("agents")); setProfiles(await request<{ active: string; items: { id: string; name: string; prompt: string }[] }>("profiles")); setTrajectory(await request<TrajectoryViewer>("trajectory")); } catch (err) { notify(errorText(err), "error"); } }
 
@@ -1409,6 +1605,18 @@ export function useAxiom() {
         openOverlay("harness");
         await loadHarness();
         return true;
+      case "/orchestrate": {
+        if (!args) {
+          notify("Опишите задачу: /orchestrate <задача>", "error");
+          return true;
+        }
+        const userMessage: LiveMessage = {
+          id: `u-${++liveId}`, role: "user", content: `/orchestrate ${args}`,
+          thinking: "", streaming: false, toolCalls: [], sources: [], createdAt: Date.now(),
+        };
+        await beginOrchestration(userMessage, args);
+        return true;
+      }
       case "/search": {
         if (!args) {
           notify("Укажите запрос: /search <запрос>", "error");
@@ -1531,6 +1739,34 @@ export function useAxiom() {
       notify(errorText(err), "error");
     }
   }
+
+  useEffect(() => {
+    if (!workspace?.current) {
+      setWorkspaceFiles([]);
+      return;
+    }
+    let active = true;
+    void request<WorkspaceFilesResult>("workspace_files", {})
+      .then((result) => { if (active) setWorkspaceFiles(result.files); })
+      .catch(() => { if (active) setWorkspaceFiles([]); });
+    return () => { active = false; };
+  }, [workspace?.current?.path]);
+
+  useEffect(() => {
+    const query = projectSearch.trim();
+    if (!query || !workspace?.current) {
+      setProjectSearchResults({ query, hits: [] });
+      return;
+    }
+    setProjectSearching(true);
+    const timer = window.setTimeout(() => {
+      void request<ProjectSearchResult>("project_search", { query })
+        .then((result) => setProjectSearchResults(result))
+        .catch(() => setProjectSearchResults({ query, hits: [], error: "Не удалось выполнить поиск по проекту" }))
+        .finally(() => setProjectSearching(false));
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [projectSearch, workspace?.current?.path]);
 
   async function openWorkspaceDialog() {
     try {
@@ -1826,8 +2062,7 @@ export function useAxiom() {
     providerLoading,
     loadProviders,
     providerTest,
-    providerSaveKey,
-    providerSetBaseUrl,
+    providerSaveSettings,
     providerDiscover,
     providerPickModel,
     agents,
@@ -1848,6 +2083,15 @@ export function useAxiom() {
     removeWorkspace,
     toggleWorkspacePin,
     openWorkspaceFile,
+    projectSearch,
+    setProjectSearch,
+    projectSearchResults,
+    projectSearching,
+    workspaceFiles,
+    openProjectSearchHit: (path: string) => openWorkspaceFile(path),
+    lastAction,
+    agentTimelineOpen,
+    setAgentTimelineOpen,
     termHistory,
     pendingTerm,
     runTerminal,

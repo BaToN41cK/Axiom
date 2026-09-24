@@ -7,6 +7,7 @@ routed back into the core (``send`` / ``cancel`` / ``switch_model`` / ...).
 
 from __future__ import annotations
 
+import asyncio
 import time
 import webbrowser
 
@@ -415,8 +416,62 @@ class WorkspaceScreen(Screen):
                 self.notify("Agent registry unavailable.", severity="warning", timeout=4)
                 return
             self.app.push_screen(AgentsPanel(agent_rows(registry.all())))
+        elif name == "/orchestrate":
+            if not argument:
+                self.notify("Usage: /orchestrate <task>", severity="warning", timeout=4)
+                return
+            self.run_worker(self._run_orchestrated(argument), exclusive=True, group="generation")
 
     # ------------------------------------------------------------------ panels
+
+    async def _run_orchestrated(self, task: str) -> None:
+        self._generating = True
+        self.input_bar.set_busy(True)
+        try:
+            self.chat_view.add(UserMessage(f"/orchestrate {task}", time.time()))
+            assistant = AssistantMessage(animations=self._animations)
+            self.chat_view.add(assistant)
+            try:
+                result = await self.session.run_orchestrated(task, limit=5, max_iterations=3)
+            except asyncio.CancelledError:
+                # The worker itself was cancelled (Esc / exclusive worker swap);
+                # the session already recorded the stop in the trajectory.
+                await assistant.add_answer("Оркестрация остановлена пользователем.")
+                return
+            if result.get("cancelled") or result.get("error") == "cancelled":
+                await assistant.add_answer("Оркестрация остановлена пользователем.")
+                return
+            if result.get("ok") is False and result.get("error"):
+                await assistant.add_answer(f"Оркестрация не запущена: {result['error']}")
+                return
+            lines = ["## Оркестрация завершена", ""]
+            for item in result.get("results", []):
+                agent = item.get("agent", "агент")
+                detail = item.get("content") or item.get("error") or "нет отчёта"
+                provider = item.get("provider_id") or "?"
+                model = item.get("model") or "?"
+                lines.append(f"- **{agent}** (`{provider}/{model}`): {detail}")
+            review = result.get("review_details") or {}
+            lines += ["", f"## Reviewer ({'APPROVED' if result.get('approved') else 'REWORK'})",
+                      str(result.get("review") or "нет ответа")]
+            if review.get("issues"):
+                lines.append("Issues: " + "; ".join(str(i) for i in review["issues"]))
+            if review.get("required_changes"):
+                lines.append("Required: " + "; ".join(str(c) for c in review["required_changes"]))
+            verification = result.get("verification") or {}
+            lines += ["", "## Verification",
+                      str(verification.get("summary") or verification.get("error") or "не запускалась")]
+            lines += ["", "## Definition of Done\n" + "\n".join(
+                          f"- {item}" for item in result.get("definition_of_done", [])
+                      ),
+                      "\nГотово." if result.get("completed", result.get("approved"))
+                      else "\nЕсть замечания reviewer или verification не прошла."]
+            await assistant.add_answer("\n".join(lines))
+        except Exception as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+        finally:
+            self._generating = False
+            self.input_bar.set_busy(False)
 
     def _model_chosen(self, name: str | None) -> None:
         if name:

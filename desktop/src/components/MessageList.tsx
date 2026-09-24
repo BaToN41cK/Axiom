@@ -420,6 +420,16 @@ function AssistantMessage({
 
       {message.error && <MessageError message={message.error.message} hint={message.error.hint} />}
 
+      {!streaming && failed && message.metrics?.stopReason && (
+        <div className="msg-note stop-reason">
+          <Square size={12} strokeWidth={2} />
+          <span>
+            {message.metrics.stopReason === "tool_round_limit"
+              ? "Агент остановился после лимита tool rounds"
+              : "Генерация завершена с ошибкой"}
+          </span>
+        </div>
+      )}
       {!streaming && !failed && (config?.show_metrics ?? true) && message.metrics && (
         <div className="msg-metrics">
           {message.metrics.tokensOut != null && <span>{message.metrics.tokensOut} tok out</span>}

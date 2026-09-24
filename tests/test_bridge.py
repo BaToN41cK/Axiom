@@ -178,18 +178,47 @@ def test_external_model_camel_case_payload_never_uses_ollama(bridge: BridgeProce
     assert reply["data"]["name"] == "deepseek/deepseek-v4-flash"
     assert reply["data"]["providerId"] == "openai_compatible"
     assert reply["data"]["source"] == "external"
+    assert "tools" in reply["data"]["capabilities"]
 
-    config = bridge.request(8, "get_config")
+    detail = bridge.request(8, "model_info", {
+        "name": "deepseek/deepseek-v4-flash",
+        "providerId": "openai_compatible",
+    })
+    assert detail["ok"] is True
+    assert detail["data"]["providerId"] == "openai_compatible"
+    assert detail["data"]["source"] == "external"
+
+    config = bridge.request(9, "get_config")
     assert config["data"]["router_primary"] == {
         "provider_id": "openai_compatible",
         "model": "deepseek/deepseek-v4-flash",
     }
-    warmup = bridge.request(9, "warmup", {})
+    warmup = bridge.request(10, "warmup", {})
     assert warmup["ok"] is True
     assert warmup["data"]["skipped"] == "external_provider"
-    status = bridge.request(10, "status")
+    status = bridge.request(11, "status")
     assert status["data"]["activeModel"]["providerId"] == "openai_compatible"
     assert status["data"]["activeModel"]["source"] == "external"
+
+
+
+def test_project_search_returns_clickable_file_hits(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "main.py").write_text("def fallback():\n    return 'ok'\n", encoding="utf-8")
+    home = tmp_path / "axiom-home"
+    home.mkdir()
+    proc = BridgeProcess(home)
+    try:
+        assert proc.request(1, "set_workspace", {"path": str(project)})["ok"] is True
+        reply = proc.request(2, "project_search", {"query": "fallback"})
+        assert reply["ok"] is True
+        assert reply["data"]["hits"]
+        assert reply["data"]["hits"][0]["path"] == "main.py"
+        assert "def fallback" in reply["data"]["hits"][0]["preview"]
+    finally:
+        proc.close()
+
 
 
 def test_send_without_ollama_reports_error_event(bridge: BridgeProcess) -> None:
@@ -197,3 +226,72 @@ def test_send_without_ollama_reports_error_event(bridge: BridgeProcess) -> None:
     # The reply itself is ok (events were streamed); without a live Ollama the
     # stream contains a structured error event, not a crash.
     assert reply["ok"] is True
+
+
+# ------------------------------------------------------------- orchestrate live progress
+
+
+def _bridge_module():
+    """Import the bridge script as a module (no stdio session is started)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("axiom_bridge_under_test", BRIDGE)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_progress_events_forward_only_new_orchestration_steps() -> None:
+    mod = _bridge_module()
+    timeline = [
+        {"seq": 1, "kind": "orchestration.command", "actor": "user", "summary": "/orchestrate x"},
+        {"seq": 2, "kind": "mode.switch", "actor": "system", "summary": "chat"},
+        {"seq": 3, "kind": "agent.start", "actor": "coder", "summary": "coder: task"},
+        {"seq": 4, "kind": "subagent.model", "actor": "coder", "summary": "ollama/test-model:latest"},
+        {"seq": 5, "kind": "subagent.reasoning", "actor": "coder", "summary": "Сначала изучу проект"},
+        {"seq": 6, "kind": "subagent.answer", "actor": "coder", "summary": "Изучаю структуру"},
+        {"seq": 7, "kind": "subagent.tool.call", "actor": "coder", "summary": "write_file index.html"},
+        {"seq": 8, "kind": "subagent.policy.mode", "actor": "coder", "summary": "mode=auto"},
+    ]
+    events = mod._progress_events(timeline, 0)
+    assert [e["kind"] for e in events] == [
+        "orchestration.command", "agent.start", "subagent.model",
+        "subagent.reasoning", "subagent.answer", "subagent.tool.call",
+    ]
+    assert all(e["type"] == "orchestration" for e in events)
+    assert events[1]["actor"] == "coder" and events[1]["seq"] == 3
+    # Steps recorded before this run (baseline) must not leak into the UI.
+    assert [e["seq"] for e in mod._progress_events(timeline, 2)] == [3, 4, 5, 6, 7]
+
+
+async def test_watch_orchestration_streams_live_trajectory_steps(monkeypatch) -> None:
+    """The watcher forwards each new step exactly once, then stops on demand."""
+    import asyncio
+
+    from axiom.core.trajectory import Trajectory
+
+    mod = _bridge_module()
+    written: list[str] = []
+    monkeypatch.setattr(mod, "_write_line", written.append)
+
+    class _Session:
+        pass
+
+    session = _Session()
+    session.trajectory = Trajectory()
+    session.trajectory.append("mode.switch", "old run", actor="system")
+    baseline = len(session.trajectory.timeline())
+    session.trajectory.append("orchestrator.plan", "mode=orchestrated", actor="orchestrator")
+    session.trajectory.append("agent.start", "coder: task", actor="coder")
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(mod._watch_orchestration(session, baseline, stop))
+    await asyncio.sleep(0.05)  # first poll flushes the already-recorded steps
+    stop.set()
+    await asyncio.wait_for(task, timeout=5)
+
+    payloads = [json.loads(line) for line in written]
+    assert all(p["type"] == "event" for p in payloads)
+    assert [p["event"]["kind"] for p in payloads] == ["orchestrator.plan", "agent.start"]
+    assert payloads[1]["event"]["actor"] == "coder"

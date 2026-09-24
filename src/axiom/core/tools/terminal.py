@@ -12,7 +12,12 @@ import os
 import re
 from pathlib import Path
 
-from axiom.core.tools.base import ToolDefinition, ToolPermission, ToolResult
+from axiom.core.tools.base import (
+    RISK_DANGEROUS,
+    ToolDefinition,
+    ToolPermission,
+    ToolResult,
+)
 from axiom.core.tools.filesystem import default_workspace_root
 
 RUN_COMMAND_TOOL = "run_command"
@@ -82,6 +87,11 @@ class TerminalTool:
                 "required": ["command"],
             },
             permission=ToolPermission.ALWAYS,  # per-call classification below
+            risk=RISK_DANGEROUS,
+            timeout=DEFAULT_TIMEOUT,
+            max_output=MAX_OUTPUT_CHARS,
+            cancellable=True,
+            workspace_scoped=True,
         )
         registry.register(definition, self._run, permission_for=self._permission_for)
 

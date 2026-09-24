@@ -104,3 +104,49 @@ async def test_invalid_arguments_reported():
     result = await registry.execute("t", {})
     assert result.ok is False
     assert "Invalid arguments" in (result.error or "")
+
+
+async def test_tool_definition_metadata_defaults_and_schema_shape():
+    definition = ToolDefinition(name="t", description="d")
+    meta = definition.meta()
+    assert meta["risk"] == "safe"
+    assert meta["timeout"] is None
+    assert meta["max_output"] is None
+    assert meta["streaming"] is False
+    assert meta["cancellable"] is True
+    assert meta["dry_run"] is False
+    assert meta["rollback"] == "none"
+    assert meta["workspace_scoped"] is False
+    # The model-facing schema must stay the plain OpenAI/Ollama shape.
+    schema = definition.schema()
+    assert set(schema["function"]) == {"name", "description", "parameters"}
+
+
+async def test_registered_tools_carry_risk_metadata():
+    from axiom.core.tools.filesystem import WorkspaceTools
+    from axiom.core.tools.git_tools import GitTools
+    from axiom.core.tools.terminal import TerminalTool
+
+    registry = ToolRegistry()
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        WorkspaceTools(root).register(registry)
+        GitTools(root).register(registry)
+        TerminalTool(root=root, enabled=True).register(registry)
+
+        read = registry.get("read_file")
+        write = registry.get("write_file")
+        delete = registry.get("delete_file")
+        command = registry.get("run_command")
+        status = registry.get("git_status")
+
+    assert read is not None and read.risk == "safe" and read.workspace_scoped is True
+    assert write is not None and write.risk == "medium" and write.dry_run is True
+    assert write is not None and write.rollback == "checkpoint"
+    assert delete is not None and delete.risk == "dangerous"
+    assert command is not None and command.risk == "dangerous"
+    assert command.max_output is not None and command.timeout is not None
+    assert status is not None and status.risk == "safe" and status.timeout is not None

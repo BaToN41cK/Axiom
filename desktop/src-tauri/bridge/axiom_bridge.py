@@ -23,6 +23,20 @@ from axiom.core.models import ModelInfo
 OUT_LOCK = threading.Lock()
 
 
+def _external_capabilities(name: str) -> list[str]:
+    """Capabilities advertised by external chat providers.
+
+    External APIs do not expose Ollama's ``/api/tags`` capability list.  The
+    OpenAI-compatible and Anthropic adapters both support function/tool calls;
+    infer only the optional reasoning marker from the model name.
+    """
+    lowered = (name or "").lower()
+    capabilities = ["tools"]
+    if any(marker in lowered for marker in ("reason", "r1", "think", "pro", "opus")):
+        capabilities.append("thinking")
+    return capabilities
+
+
 def _model_json(m, loaded: bool = False, provider_id: str = "ollama", source: str = "ollama") -> dict:
     return {
         "name": m.name,
@@ -42,17 +56,26 @@ def _model_json(m, loaded: bool = False, provider_id: str = "ollama", source: st
 
 
 async def _models_json(session: ChatSession) -> list[dict]:
-    """Local Ollama models plus the active external route."""
-    models = await session.refresh_models()
-    loaded = await session.registry.running_names()
+    """Return local Ollama models plus the configured external route.
+
+    Ollama may be completely absent in an API-only desktop session. Model
+    discovery must therefore be best-effort and must not turn the provider
+    picker into a startup error.
+    """
+    try:
+        models = await session.refresh_models()
+        loaded = await session.registry.running_names()
+    except Exception:
+        models, loaded = [], set()
     rows = [_model_json(m, loaded=m.name in loaded) for m in models]
     target = session.router.config.primary
     if target is not None and target.provider_id != "ollama" and target.model:
         rows.append({
             "name": target.model, "displayName": target.model, "sizeGb": 0,
             "sizeBytes": 0, "parameterSize": "", "quantization": "", "family": "",
-            "capabilities": [], "contextLength": None, "numCtx": None, "loaded": False,
-            "providerId": target.provider_id, "source": "external",
+            "capabilities": _external_capabilities(target.model), "contextLength": None,
+            "numCtx": None, "loaded": False, "providerId": target.provider_id,
+            "source": "external",
         })
     return rows
 
@@ -133,6 +156,7 @@ def _event_json(e: ChatEvent) -> dict:
             "tokensPerSecond": e.tokens_per_second,
             "ttftMs": e.ttft_ms,
             "loadMs": e.load_ms,
+            "stopReason": e.stop_reason,
         }
     return {"type": type(e).__name__}
 
@@ -180,6 +204,75 @@ async def _stream_turn(session: ChatSession, events) -> dict:
     }
 
 
+#: Trajectory kinds that mean real /orchestrate progress for the UI.
+_ORCHESTRATION_PROGRESS = frozenset({
+    "orchestration.command",
+    "orchestrator.plan",
+    "agent.start",
+    "agent.done",
+    "agent.failed",
+    "subagent.model",
+    "subagent.reasoning",
+    "subagent.answer",
+    "subagent.tool.call",
+    "subagent.tool.result",
+    "orchestrator.review",
+    "verification.completed",
+    "orchestrator.done",
+    "orchestration.cancelled",
+    "orchestration.failed",
+})
+
+
+def _progress_events(timeline: list[dict], baseline: int = 0) -> list[dict]:
+    """Map new trajectory entries to plain-JSON ``orchestration`` bridge events.
+
+    ``baseline`` skips everything recorded before this orchestration run, so a
+    long-lived session never replays old steps into the current request.
+    """
+    events: list[dict] = []
+    for entry in list(timeline)[max(0, int(baseline)):]:
+        kind = str(entry.get("kind") or "")
+        if kind not in _ORCHESTRATION_PROGRESS:
+            continue
+        events.append({
+            "type": "orchestration",
+            "kind": kind,
+            "actor": str(entry.get("actor") or ""),
+            "summary": str(entry.get("summary") or ""),
+            "seq": int(entry.get("seq") or 0),
+        })
+    return events
+
+
+async def _watch_orchestration(session: ChatSession, baseline: int,
+                               stop: asyncio.Event) -> None:
+    """Stream live /orchestrate progress to the shell until the run finishes.
+
+    The reply of the ``orchestrate`` command arrives only at the very end; a
+    local model easily needs several minutes for four workers plus review.
+    Workers record their real steps (plan, start/done, tool calls, review,
+    verification) into the session trajectory as they happen, so polling it is
+    the honest live feed — without it the UI sits on «Подключается…» forever.
+    """
+    seen = max(0, int(baseline))
+    while True:
+        try:
+            timeline = session.trajectory.timeline()
+        except Exception:
+            timeline = []
+        for payload in _progress_events(timeline, seen):
+            line = json.dumps({"type": "event", "event": payload}, ensure_ascii=False)
+            await asyncio.get_running_loop().run_in_executor(None, _write_line, line)
+        seen = max(seen, len(timeline))
+        if stop.is_set():
+            return
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.6)
+        except TimeoutError:
+            pass
+
+
 async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
     if cmd == "health":
         available = await session.client.is_available()
@@ -212,7 +305,14 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
     if cmd == "tools":
         return session.tools_info()
     if cmd == "model_info":
-        detail = await session.model_detail(args.get("name"))
+        provider_id = str(args.get("provider_id") or args.get("providerId") or "ollama")
+        target = str(args.get("name") or "")
+        if provider_id != "ollama":
+            active = session.active_model
+            if active is not None and active.name == target:
+                return _active_model_json(session)
+            return None
+        detail = await session.model_detail(target or None)
         return _model_json(detail) if detail else None
     if cmd == "startup":
         report = await session.startup()
@@ -286,6 +386,36 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         ]}
     if cmd == "trajectory":
         return session.trajectory.viewer()
+    if cmd == "orchestrate":
+        # Live progress: forward the real trajectory steps while the workers
+        # run; the reply below arrives only minutes later with the full report.
+        try:
+            baseline = len(session.trajectory.timeline())
+        except Exception:
+            baseline = 0
+        stop = asyncio.Event()
+        watcher = asyncio.create_task(_watch_orchestration(session, baseline, stop))
+        try:
+            result = await session.run_orchestrated(
+                str(args.get("text") or ""),
+                limit=int(args.get("limit") or 4),
+                max_iterations=int(args.get("max_iterations") or 3),
+            )
+        finally:
+            stop.set()
+            try:
+                await watcher
+            except Exception:
+                pass
+        # The orchestration trajectory is a live Python object; the JSONL
+        # bridge protocol can only transport plain JSON, so expose the
+        # viewer/timeline representation instead of the raw object.
+        trajectory = result.pop("trajectory", None)
+        try:
+            result["trajectory"] = trajectory.viewer() if trajectory is not None else None
+        except Exception:
+            result["trajectory"] = None
+        return result
     if cmd == "agents":
         return [{"id": a.id, "label": a.label, "provider_id": a.provider_id,
                  "model": a.model, "tools": a.tools} for a in session.agent_registry.all()]
@@ -395,6 +525,26 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
 
         depth = max(1, min(int(args.get("depth", 3) or 3), 5))
         return {"tree": _tree(root, depth), "root": str(root)}
+    if cmd == "workspace_files":
+        root = session.workspace_root
+        if root is None:
+            return {"files": []}
+        from axiom.core.tools.filesystem import IGNORED_DIRS
+
+        files: list[str] = []
+        try:
+            for path in sorted(root.rglob("*"), key=lambda p: p.as_posix().lower()):
+                if not path.is_file():
+                    continue
+                rel_parts = path.relative_to(root).parts
+                if any(part.startswith(".") or part in IGNORED_DIRS for part in rel_parts[:-1]):
+                    continue
+                files.append(path.relative_to(root).as_posix())
+                if len(files) >= 5000:
+                    break
+        except OSError:
+            return {"files": [], "error": "Не удалось прочитать список файлов"}
+        return {"files": files}
     if cmd == "workspace_file":
         root = session.workspace_root
         if root is None:
@@ -487,6 +637,24 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
     if cmd == "search_chats":
         hits = session.history_store.search(str(args.get("query", "")))
         return {"hits": hits}
+    if cmd == "project_search":
+        root = session.workspace_root
+        if root is None:
+            return {"query": str(args.get("query", "")), "hits": []}
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return {"query": query, "hits": []}
+        result = await session.tools.execute("search_text", {"query": query})
+        if not result.ok:
+            return {"query": query, "hits": [], "error": result.error}
+        hits = []
+        for line in (result.content or "").splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(":", 2)
+            if len(parts) >= 2:
+                hits.append({"path": parts[0].strip(), "preview": (parts[2] if len(parts) == 3 else "").strip()})
+        return {"query": query, "hits": hits}
     if cmd == "chat_meta":
         cid = str(args.get("id", ""))
         ok = session.history_store.set_meta(
@@ -537,6 +705,12 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         agent = getattr(session, "agent", None)
         if agent is not None:
             agent.config = new_cfg
+            agent._config = new_cfg
+        ws_tools = getattr(session, "workspace_tools", None)
+        if ws_tools is not None:
+            ws_tools.access_mode = new_cfg.access_mode
+            if new_cfg.workspace_root:
+                ws_tools.set_root(Path(new_cfg.workspace_root).expanduser())
         web_tool = getattr(session, "web_tool", None)
         if web_tool is not None:
             web_tool.max_sources = new_cfg.search_max_sources
@@ -593,7 +767,7 @@ async def _handle(session: ChatSession, cmd: str, args: dict) -> object:
         session.config.router_primary = {"provider_id": provider_id, "model": name}
         session.config.save()
         session._configure_router_from_config()
-        active = ModelInfo(name=name, capabilities=[])
+        active = ModelInfo(name=name, capabilities=_external_capabilities(name))
         session.active_model = active
         session.conversation.model = active.name
         return _model_json(active, provider_id=provider_id, source="external")

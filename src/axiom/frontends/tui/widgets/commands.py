@@ -45,6 +45,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("/trajectory", "Trajectory viewer: steps, tool calls, tokens/cost"),
     Command("/providers", "Provider manager: statuses, test connection"),
     Command("/agents", "Agent registry: roles and assigned models"),
+    Command("/orchestrate", "Run a task through analyst, coder, debugger, tester and reviewer", "task"),
     Command("/exit", "Exit Axiom"),
 )
 

@@ -45,6 +45,28 @@ def _resolve(root: Path, rel: str) -> Path | None:
     return None
 
 
+def mentioned_files(text: str, root: Path | None, limit: int = MAX_MENTIONS) -> list[str]:
+    """Return valid workspace files explicitly named by ``@path`` mentions."""
+    if root is None or "@" not in (text or ""):
+        return []
+    try:
+        root = root.resolve()
+    except OSError:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for match in MENTION_RE.finditer(text or ""):
+        rel = match.group("path").replace("\\", "/")
+        target = _resolve(root, rel)
+        if target is None or rel in seen:
+            continue
+        seen.add(rel)
+        result.append(rel)
+        if len(result) >= max(1, min(int(limit), MAX_MENTIONS)):
+            break
+    return result
+
+
 def expand_mentions(text: str, root: Path | None) -> str:
     """Replace existing ``@path`` mentions with fenced file content.
 

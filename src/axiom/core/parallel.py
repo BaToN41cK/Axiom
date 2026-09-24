@@ -31,7 +31,9 @@ async def run_parallel(tasks: list[dict], runner: Runner,
                     pass
             try:
                 out = await runner(**task)
-                result = {"status": "done", **dict(out or {})}
+                result = {**dict(out or {}), "status": "done"}
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 result = {"status": "failed", "agent": task.get("agent"),
                           "error": f"{type(exc).__name__}: {exc}"}
@@ -43,7 +45,16 @@ async def run_parallel(tasks: list[dict], runner: Runner,
                     pass
             return result
 
-    results = await asyncio.gather(*[_one(t) for t in tasks])
+    try:
+        results = await asyncio.gather(*[_one(t) for t in tasks])
+    except asyncio.CancelledError:
+        if trajectory is not None:
+            try:
+                trajectory.append("orchestrator.cancelled",
+                                  f"cancelled {len(tasks)} subagents", actor="orchestrator")
+            except Exception:
+                pass
+        raise
     merged: dict = {"ok": all(r.get("status") == "done" for r in results),
                     "count": len(results),
                     "agents": [r.get("agent") for r in results]}

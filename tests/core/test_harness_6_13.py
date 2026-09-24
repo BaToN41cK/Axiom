@@ -71,7 +71,100 @@ async def test_orchestrator_plans_debug_and_runs_subagents():
     assert all(r["status"] == "done" for r in out["results"])
 
 
-def test_orchestrator_tools_are_scoped_per_agent():
+def test_orchestrator_selects_at_most_five_roles_and_defines_done():
+    plan = Orchestrator().plan("оркестратор: coder, debugger, researcher и tester")
+    assert len(plan.agents) <= 5
+    assert plan.definition_of_done
+    assert "analyst" in plan.agents
+
+
+def test_orchestrator_tools_include_analyst_scope():
+    assert "read_file" in Orchestrator().tools_for("analyst")
+
+
+async def test_orchestrator_reviewer_can_request_rework():
+    calls: list[str] = []
+
+    async def _runner(**kwargs):
+        calls.append(str(kwargs.get("agent")))
+        if kwargs.get("agent") == "reviewer":
+            return {"content": "REWORK: add a failing test"}
+        return {"content": "done"}
+
+    out = await Orchestrator().run("сделай код", runner=_runner)
+    assert out["approved"] is False
+    assert "REWORK" in out["review"]
+    assert "reviewer" in calls
+
+
+async def test_orchestrator_rework_reruns_workers_and_verifies():
+    calls: list[str] = []
+    reviews = 0
+
+    async def _runner(**kwargs):
+        nonlocal reviews
+        agent = str(kwargs.get("agent"))
+        calls.append(agent)
+        if agent == "reviewer":
+            reviews += 1
+            if reviews == 1:
+                return {"approved": False, "reason": "missing test",
+                        "issues": ["no regression test"],
+                        "required_changes": ["add regression test"]}
+            return {"approved": True, "reason": "checks passed"}
+        return {"agent": agent, "content": f"{agent} completed"}
+
+    async def _verify():
+        return {"ok": True, "summary": "pytest: pass"}
+
+    out = await Orchestrator().run(
+        "исправь код", runner=_runner, parallel=True, limit=5,
+        max_iterations=3, force_orchestrated=True, verifier=_verify,
+    )
+    assert out["approved"] is True
+    assert out["verification"] == {"ok": True, "summary": "pytest: pass"}
+    assert calls.count("coder") == 2
+    assert calls.count("reviewer") == 2
+    assert any(e.kind == "verification.completed" for e in out["trajectory"].events)
+
+
+async def test_orchestrator_rework_is_bounded():
+    calls: list[str] = []
+
+    async def _runner(**kwargs):
+        agent = str(kwargs.get("agent"))
+        calls.append(agent)
+        if agent == "reviewer":
+            return {"approved": False, "reason": "still broken",
+                    "required_changes": ["fix it"]}
+        return {"content": "attempt"}
+
+    out = await Orchestrator().run(
+        "исправь код", runner=_runner, parallel=True, limit=5,
+        max_iterations=3, force_orchestrated=True,
+    )
+    assert out["approved"] is False
+    assert calls.count("reviewer") == 3
+    assert len([e for e in out["trajectory"].events if e.kind == "orchestrator.review"]) == 3
+
+
+def test_orchestrator_emits_planning_and_completion_events():
+    from axiom.core.bus import EventBus
+
+    seen: list[dict] = []
+    bus = EventBus()
+    bus.subscribe("orchestration.planned", seen.append)
+
+    async def _runner(**kwargs):
+        return {"content": "ok"}
+
+    out = __import__("asyncio").run(Orchestrator(bus=bus).run(
+        "сделай код", runner=_runner, force_orchestrated=True,
+    ))
+    assert out["mode"] == "orchestrated"
+    assert any(item.get("event") == "orchestration.planned" for item in seen)
+
+
     orch = Orchestrator()
     assert "web_search" in orch.tools_for("researcher")
     assert "write_file" not in orch.tools_for("researcher")

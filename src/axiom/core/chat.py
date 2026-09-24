@@ -43,7 +43,7 @@ from axiom.core.events import (
     ToolResultEvent,
 )
 from axiom.core.history import Conversation, HistoryStore
-from axiom.core.mentions import expand_mentions
+from axiom.core.mentions import expand_mentions, mentioned_files
 from axiom.core.models import ModelInfo, ModelRegistry
 from axiom.core.ollama import OllamaClient
 from axiom.core.profiles import ProfileManager
@@ -63,6 +63,7 @@ from axiom.core.tools.git_tools import (
 from axiom.core.tools.project_tools import INSPECT_PROJECT_TOOL, ProjectTools
 from axiom.core.tools.registry import ToolRegistry
 from axiom.core.tools.terminal import RUN_COMMAND_TOOL, TerminalTool, classify_command
+from axiom.core.tools.verify_tools import VERIFY_TOOL_NAMES, VerificationTools
 from axiom.core.tools.web_search import WebSearchTool
 from axiom.core.workspace import ProjectInfo, WorkspaceManager, detect_project
 
@@ -79,7 +80,7 @@ WORKSPACE_TOOL_NAMES: frozenset[str] = frozenset(WORKSPACE_TOOLS) | {
     GIT_BRANCH_TOOL,
     INSPECT_PROJECT_TOOL,
     RUN_COMMAND_TOOL,
-}
+} | VERIFY_TOOL_NAMES
 
 
 @dataclass
@@ -159,6 +160,17 @@ class ChatSession:
                 enabled=self.config.access_mode != "read_only",
             )
             self.terminal.register(self.tools)
+        # §34 Verification tools: fixed test/lint/build commands. They spawn
+        # processes, so they follow the terminal's enable flag exactly.
+        self.verify_tools: VerificationTools | None = None
+        if self.config.workspace_tools_enabled and self.config.terminal_enabled:
+            self.verify_tools = VerificationTools(
+                root=Path(self.config.workspace_root).expanduser()
+                if self.config.workspace_root
+                else None,
+                enabled=self.config.access_mode != "read_only",
+            )
+            self.verify_tools.register(self.tools)
         self.workspaces = WorkspaceManager()
         if self.config.workspace_root:
             self.workspaces.remember(Path(self.config.workspace_root))
@@ -212,7 +224,7 @@ class ChatSession:
         self.trajectory_store = TrajectoryStore()
         self.orchestrator = Orchestrator(agents=self.agent_registry, bus=self.bus)
         self.context_engine = ContextEngine()
-        self.verifier = VerificationLoop()
+        self.verifier = VerificationLoop(runner=self._verification_runner)
         self.sandbox = Sandbox()
         from axiom.core.permissions import PermissionManager
 
@@ -246,7 +258,7 @@ class ChatSession:
         self.agent.attach_harness(bus=self.bus, trajectory=self.trajectory,
                                   router=self.router, catalog=self.model_catalog,
                                   sandbox=self.sandbox, skills=self.skills,
-                                  verifier=self.verifier)
+                                  verifier=self.verifier, permissions=self.permissions)
         # All providers expose the same normalized stream to Agent.  Ollama
         # remains the default, while a configured router_primary selects the
         # external provider for the real chat path.
@@ -258,6 +270,16 @@ class ChatSession:
             ollama_client=self.client,
         )
         self.agent._client = self.provider_client
+
+    async def _verification_runner(self, command: str, step: str) -> dict:
+        """Run a verification command through the real workspace terminal."""
+        if self.terminal is None or not self.terminal.enabled:
+            return {"ok": False, "output": "Terminal is disabled for the current workspace"}
+        result = await self.terminal._run(command)
+        return {
+            "ok": result.ok,
+            "output": result.content if result.ok else result.error,
+        }
 
     def _configure_router_from_config(self) -> None:
         """Собрать RouterConfig из Config (п.16-17): primary + fallback chain."""
@@ -420,54 +442,324 @@ class ChatSession:
         self.trajectory.append("mode.switch", mode, actor="system", data=info)
         return info
 
-    async def run_parallel_agents(self, text: str, *, limit: int = 4) -> dict:
-        """Параллельный запуск сабагентов (п.8/28) с реальными генерациями."""
+    def _worker_model(self, agent_id: str, task: str):
+        """Resolve the exact model one specialist must call.
+
+        The orchestrated workflow must never silently downgrade a selected
+        external model to the Ollama default: every worker reuses the active
+        session model object, so routing, capabilities and provider identity
+        stay consistent from Desktop/TUI down to the provider call.
+        """
+        model = self.active_model
+        if model is None:  # pragma: no cover - guarded by callers
+            from axiom.core.models import ModelInfo
+
+            return ModelInfo(name=self.config.model or "qwen3:8b")
+        target = self.router.config.primary
+        if (target is not None and target.provider_id != "ollama" and target.model
+                and model.name != target.model):
+            from axiom.core.models import ModelInfo
+
+            caps = list(model.capabilities or [])
+            if not caps:
+                caps = ["tools"]
+            return ModelInfo(name=target.model, capabilities=caps)
+        return model
+
+    def _active_provider_id(self) -> str:
+        target = self.router.config.primary
+        if target is not None and target.provider_id:
+            return str(target.provider_id)
+        return "ollama"
+
+    @staticmethod
+    def _merge_child_trajectory(parent, child, agent_id: str) -> None:
+        """Copy one worker's private trajectory into the orchestration trace.
+
+        Workers execute against a private trajectory (isolation), but the
+        user-facing orchestration trajectory must still allow full recovery
+        of planning, tool calls, worker results and errors.
+        """
+        if parent is None or child is None or parent is child:
+            return
+        try:
+            for event in list(child.events):
+                if event.kind == "tool.call":
+                    # Live worker tool activity is already recorded on the parent
+                    # as ``subagent.tool.call``/``subagent.tool.result`` the moment
+                    # it happens; merging the child copy would duplicate every tool
+                    # line in the trajectory viewer.
+                    continue
+                parent.append(f"subagent.{event.kind}", event.summary,
+                              actor=event.actor or agent_id,
+                              data=dict(event.data or {}))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _tool_detail(name: str, arguments: dict | None) -> str:
+        """Human target of a tool call (path/command/query/...), like Agent does."""
+        args = arguments or {}
+        for key in ("path", "command", "query", "url", "pattern", "glob"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _record_worker_tool(parent, agent_id: str, kind: str, summary: str,
+                            data: dict | None = None) -> None:
+        """Put one worker step (tool, model identity, text) on the trajectory now.
+
+        Workers run isolated trajectories (merged only when a worker finishes),
+        so without this record the UI would see no tool activity for minutes
+        even though agents are really working.
+        """
+        if parent is None:
+            return
+        try:
+            parent.append(kind, summary, actor=agent_id, data=dict(data or {}))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _flush_worker_text(parent, agent_id: str, kind: str, buffer: list[str]) -> None:
+        """Publish one completed worker text segment (thinking or prose pass).
+
+        The live feed only carries ``summary``, so the flat single-line preview
+        goes there (capped for the UI); the full text is kept in ``data`` for
+        the trajectory viewer and post-run analysis.
+        """
+        text = " ".join("".join(buffer).split())
+        buffer.clear()
+        if not text:
+            return
+        ChatSession._record_worker_tool(
+            parent, agent_id, kind, text[:300] + ("…" if len(text) > 300 else ""),
+            data={"text": text[:4000]},
+        )
+
+    async def _subagent_runner(self, **kwargs) -> dict:
+        """Execute one isolated specialist with real model and scoped tools."""
+        from axiom.core.permissions import PermissionManager
+        from axiom.core.sandbox import Sandbox
+        from axiom.core.trajectory import Trajectory
+
         model = self.active_model
         if model is None:
+            return {"error": "no model is available"}
+        task = str(kwargs.get("task") or "")
+        agent_id = str(kwargs.get("agent") or "subagent")
+        allowed = set(kwargs.get("tools") or ())
+        parent_traj = kwargs.get("trajectory")
+        request_config = self.config.model_copy(deep=True)
+        role_prompts = {
+            "analyst": "Analyze the task and project. Do not edit files.",
+            "architect": "Design the smallest compatible implementation. Do not edit files.",
+            "coder": "Implement the requested change with minimal, local edits.",
+            "debugger": "Diagnose and fix the concrete failure. Verify the diagnosis.",
+            "tester": "Run relevant real checks and report their actual results.",
+            "reviewer": "Review worker results. Return APPROVED or structured REWORK with issues and required_changes.",
+            "researcher": "Research only when external facts are required; cite sources.",
+            "security": "Review security risks without changing unrelated code.",
+        }
+        from axiom.core.agent import DEFAULT_SYSTEM_PROMPT
+        base_prompt = request_config.system_prompt or DEFAULT_SYSTEM_PROMPT
+        request_config.system_prompt = (
+            f"{base_prompt}\n\nSpecialist role: {agent_id}. "
+            f"{role_prompts.get(agent_id, 'Complete the assigned task.')}"
+        ).strip()
+        request_registry = self.tools.subset(allowed)
+        from axiom.core.tools.web_search import WebSearchTool
+
+        request_web_tool = WebSearchTool(self.provider, max_sources=self.config.search_max_sources)
+        if "web_search" in allowed or "fetch_url" in allowed:
+            request_web_tool.register(request_registry)
+        # Every worker owns an isolated runtime context: private config copy
+        # (above), private event bus, state machine, trajectory, router,
+        # catalog, skills, sandbox and permission cache. Only stateless tool
+        # handlers, the model transport and read-only parent data are shared.
+        from axiom.core.bus import EventBus
+
+        child_traj = Trajectory(actor=agent_id)
+        request_permissions = PermissionManager(config=request_config)
+        request_permissions._request_callback = self.permissions._request_callback
+        request_agent = Agent(
+            self.client, config=request_config, registry=request_registry,
+            machine=GenerationStateMachine(), web_tool=request_web_tool,
+            bus=EventBus(), trajectory=child_traj,
+        )
+        request_agent._client = self.provider_client
+        request_agent.attach_harness(
+            trajectory=child_traj,
+            router=deepcopy(self.router), catalog=deepcopy(self.model_catalog),
+            sandbox=Sandbox(policies=dict(self.sandbox.policies), ask_callback=self.sandbox.ask_callback),
+            skills=deepcopy(self.skills), permissions=request_permissions,
+            verifier=self.verifier,
+        )
+        parts: list[str] = []
+        pass_content: list[str] = []
+        pass_thinking: list[str] = []
+        tool_calls = 0
+        tool_ok = 0
+        tool_failed = 0
+        worker_model = self._worker_model(agent_id, task)
+        # Publish the exact model/provider this specialist will call before the
+        # first token — the final reply arrives minutes later, the live feed
+        # must already say which model is actually working.
+        provider_id = self._active_provider_id()
+        self._record_worker_tool(
+            parent_traj, agent_id, "subagent.model",
+            f"{provider_id}/{worker_model.name}",
+            data={"provider_id": provider_id, "model": worker_model.name},
+        )
+
+        def _flush_pass() -> None:
+            # One model pass ends at the next tool call (or at run end):
+            # publish what it thought and what it wrote, immediately.
+            self._flush_worker_text(parent_traj, agent_id,
+                                    "subagent.reasoning", pass_thinking)
+            self._flush_worker_text(parent_traj, agent_id,
+                                    "subagent.answer", pass_content)
+
+        try:
+            async for event in request_agent.run([{"role": "user", "content": task}], worker_model):
+                if isinstance(event, ReasoningChunk):
+                    pass_thinking.append(event.text)
+                elif isinstance(event, ContentChunk):
+                    parts.append(event.text)
+                    pass_content.append(event.text)
+                elif isinstance(event, ToolCallEvent):
+                    _flush_pass()
+                    tool_calls += 1
+                    detail = self._tool_detail(event.name, event.arguments)
+                    self._record_worker_tool(
+                        parent_traj, agent_id, "subagent.tool.call",
+                        f"{event.name} {detail}".strip(),
+                        data={"tool": event.name, "arguments": dict(event.arguments)},
+                    )
+                elif isinstance(event, ToolResultEvent):
+                    if event.ok:
+                        tool_ok += 1
+                    else:
+                        tool_failed += 1
+                    if event.ok:
+                        outcome = (f"ok ({event.duration_ms} ms)" if event.duration_ms
+                                   else "ok")
+                    else:
+                        outcome = f"failed: {str(event.error or 'error')[:200]}"
+                    self._record_worker_tool(
+                        parent_traj, agent_id, "subagent.tool.result",
+                        f"{event.name} {outcome}",
+                        data={"tool": event.name, "ok": event.ok,
+                              "duration_ms": event.duration_ms,
+                              "error": event.error},
+                    )
+        except Exception as exc:
+            _flush_pass()
+            self._merge_child_trajectory(parent_traj, child_traj, agent_id)
+            return {"agent": agent_id, "error": f"{type(exc).__name__}: {exc}"}
+        _flush_pass()
+        self._merge_child_trajectory(parent_traj, child_traj, agent_id)
+        route = dict(getattr(self.provider_client, "last_route", {}) or {})
+        result = {
+            "agent": agent_id,
+            "content": "".join(parts).strip()[:4000],
+            "provider_id": route.get("provider_id") or self._active_provider_id(),
+            "model": route.get("model") or worker_model.name,
+            "tools_used": tool_calls,
+            "tools_ok": tool_ok,
+            "tools_failed": tool_failed,
+        }
+        if not result["content"]:
+            result["error"] = "empty model response"
+        return result
+
+    async def run_orchestrated(self, text: str, *, limit: int = 4,
+                               max_iterations: int = 3) -> dict:
+        """Run the real multi-agent workflow for an explicit orchestration request.
+
+        ``/orchestrate`` is a generation from the UI point of view: while the
+        workers run, ``busy`` stays true and the next request must be rejected
+        or cancelled first. The flag is released on every exit path so Desktop
+        and TUI can always accept the next command afterwards.
+        """
+        if self.active_model is None:
             return {"ok": False, "error": "no model is available"}
-
-        async def _runner(**kwargs) -> dict:
-            from axiom.core.sandbox import Sandbox
-            from axiom.core.trajectory import Trajectory
-
-            task = str(kwargs.get("task") or text)
-            agent_id = str(kwargs.get("agent") or "")
-            parts: list[str] = []
-            # Each parallel request owns its agent state, state machine, config,
-            # registry and trajectory. Only the transport and stateless tool
-            # handlers are shared with the session.
-            request_config = self.config.model_copy(deep=True)
-            allowed = set(kwargs.get("tools") or ())
-            request_registry = self.tools.subset(allowed)
-            from axiom.core.tools.web_search import WebSearchTool
-
-            request_web_tool = WebSearchTool(self.provider, max_sources=self.config.search_max_sources)
-            if "web_search" in allowed or "fetch_url" in allowed:
-                request_web_tool.register(request_registry)
-            request_agent = Agent(
-                self.client, config=request_config, registry=request_registry,
-                machine=GenerationStateMachine(), web_tool=request_web_tool,
-            )
-            request_agent._client = self.provider_client
-            request_agent.attach_harness(
-                trajectory=Trajectory(actor=agent_id or "subagent"),
-                router=deepcopy(self.router), catalog=deepcopy(self.model_catalog),
-                sandbox=Sandbox(policies=dict(self.sandbox.policies),
-                                ask_callback=self.sandbox.ask_callback),
-                skills=deepcopy(self.skills),
-            )
+        if not text.strip():
+            return {"ok": False, "error": "Orchestration task is empty. Use /orchestrate <task>."}
+        if self.busy:
+            return {"ok": False, "error": "A generation is already running."}
+        self.trajectory.append("orchestration.command", f"/orchestrate {text[:200]}",
+                               actor="user")
+        # ``busy`` is derived from ``_task``; keep a real task for the whole
+        # orchestration so Desktop/TUI generation locks behave exactly like a
+        # normal generation (busy during work, released afterwards) and Esc
+        # actually cancels the workers instead of doing nothing.
+        current = asyncio.current_task()
+        orchestration = asyncio.ensure_future(self._run_orchestrated_inner(
+            text, limit=min(5, max(1, limit)),
+            max_iterations=min(3, max(1, max_iterations))))
+        self._task = orchestration  # type: ignore[assignment]
+        try:
+            return await asyncio.shield(orchestration)
+        except asyncio.CancelledError:
+            # Two cases land here: (a) our caller cancelled this task — the
+            # shield kept the orchestration alive, so stop it explicitly and
+            # restore the cancellation count; (b) session.cancel() stopped the
+            # orchestration task itself — the caller was never cancelled.
+            if current is not None and current.cancelling() > 0:
+                current.uncancel()
+            if not orchestration.done():
+                orchestration.cancel()
             try:
-                async for event in request_agent.run(
-                    [{"role": "user", "content": task}], model
-                ):
-                    if isinstance(event, ContentChunk):
-                        parts.append(event.text)
-            except Exception as exc:
-                return {"agent": agent_id, "error": f"{type(exc).__name__}: {exc}"}
-            return {"agent": agent_id, "content": "".join(parts).strip()[:2000]}
+                await orchestration
+            except asyncio.CancelledError:
+                pass
+            return {"ok": False, "error": "cancelled",
+                    "cancelled": True, "approved": False, "completed": False}
+        finally:
+            if self._task is orchestration:
+                self._task = None
+            self._verifying = False
 
+    async def _run_orchestrated_inner(self, text: str, *, limit: int, max_iterations: int) -> dict:
+        try:
+            return await self.orchestrator.run(
+                text, self.trajectory, self._subagent_runner, parallel=True,
+                limit=limit, max_iterations=max_iterations,
+                force_orchestrated=True, verifier=self._run_orchestration_verification,
+            )
+        except asyncio.CancelledError:
+            try:
+                self.trajectory.append("orchestration.cancelled",
+                                       "stopped by user", actor="orchestrator")
+            except Exception:
+                pass
+            self.bus.emit("orchestration.cancelled", {"run_id": self.trajectory.run_id})
+            raise
+        except Exception as exc:
+            self.trajectory.append(
+                "orchestration.failed", f"{type(exc).__name__}: {exc}", actor="orchestrator",
+                data={"error": str(exc)})
+            self.bus.emit("orchestration.failed",
+                          {"run_id": self.trajectory.run_id, "error": str(exc)})
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                    "approved": False, "completed": False}
+
+    async def _run_orchestration_verification(self) -> dict:
+        if self.verifier is None:
+            return {"ok": False, "error": "verification unavailable"}
+        report = await self.verifier.run(kind="python")
+        return {"ok": report.ok, "summary": report.summary(), "errors": list(report.errors)}
+
+    async def run_parallel_agents(self, text: str, *, limit: int = 4) -> dict:
+        """Backward-compatible four-worker runtime used by existing integrations."""
+        if self.active_model is None:
+            return {"ok": False, "error": "no model is available"}
         return await self.orchestrator.run(
-            text, self.trajectory, _runner, parallel=True, limit=limit
+            text, self.trajectory, self._subagent_runner, parallel=True,
+            limit=min(4, max(1, limit)),
         )
 
     # ------------------------------------------------------------- lifecycle
@@ -584,13 +876,9 @@ class ChatSession:
         return detail
 
     def tools_info(self) -> list[dict[str, Any]]:
-        """Agent tools as the backend really declares them (name/description/permission)."""
+        """Agent tools as the backend really declares them (name/description/permission/risk)."""
         return [
-            {
-                "name": definition.name,
-                "description": definition.description,
-                "permission": definition.permission.value,
-            }
+            {"description": definition.description, **definition.meta()}
             for definition in self.tools.definitions()
         ]
 
@@ -608,6 +896,16 @@ class ChatSession:
                 registry=self.tools,
                 machine=self.machine,
                 web_tool=self.web_tool,
+            )
+            self.agent.attach_harness(
+                bus=self.bus,
+                trajectory=self.trajectory,
+                router=self.router,
+                catalog=self.model_catalog,
+                sandbox=self.sandbox,
+                skills=self.skills,
+                verifier=self.verifier,
+                permissions=self.permissions,
             )
             self.agent._client = self.provider_client
         return await self.startup()
@@ -744,6 +1042,13 @@ class ChatSession:
         elif self.config.terminal_enabled and self.config.access_mode != "read_only":
             self.terminal = TerminalTool(root=target, enabled=True)
             self.terminal.register(self.tools)
+        if self.verify_tools is not None:
+            self.verify_tools.set_root(target)
+            self.verify_tools.enabled = self.config.access_mode != "read_only"
+            self.verify_tools.register(self.tools)
+        elif self.config.terminal_enabled and self.config.access_mode != "read_only":
+            self.verify_tools = VerificationTools(root=target, enabled=True)
+            self.verify_tools.register(self.tools)
         # Project Intelligence (п.19): авто-индекс + .axiom/ персист.
         try:
             from axiom.core.project_index import ProjectMemory as _PM
@@ -780,6 +1085,8 @@ class ChatSession:
             self.tools.unregister(name)
         if self.terminal is not None:
             self.terminal.enabled = False
+        if self.verify_tools is not None:
+            self.verify_tools.enabled = False
 
     async def run_terminal(self, command: str, confirmed: bool = False) -> dict:
         """Run a real shell command in the workspace (GUI terminal panel).
@@ -1084,7 +1391,7 @@ class ChatSession:
                 return value
         return None
 
-    def _context_messages(self) -> list[dict]:
+    def _context_messages(self, text: str | None = None) -> list[dict]:
         """Convert stored messages into the Ollama request format.
 
         Old reasoning traces are stripped: they bloat the prompt (a low-resource
@@ -1102,6 +1409,7 @@ class ChatSession:
             limit = CONTEXT_MESSAGES
         history: list[dict] = []
         root = self.workspace_root
+        focus = mentioned_files(text or "", root)
         for message in self.conversation.messages[-limit:]:
             if message.role in ("user", "assistant") and (message.content or message.images):
                 content = message.content
@@ -1109,6 +1417,15 @@ class ChatSession:
                     # ``@path`` mentions expand to real file content for the
                     # MODEL only — the stored history keeps the user's text.
                     content = expand_mentions(content, root)
+                # Explicit file mentions are the only files added to this turn.
+                # No project-wide dump is performed: the model can still call
+                # read_file/search_files for additional files when needed.
+                if focus and message.role == "user" and message.content == (text or message.content):
+                    content = (
+                        content
+                        + "\n\nFocus files for this task (use these exact workspace paths):\n"
+                        + "\n".join(f"- {path}" for path in focus)
+                    )
                 entry: dict[str, Any] = {"role": message.role, "content": content}
                 if message.images:
                     # Ollama vision models expect base64 images per message.
@@ -1158,6 +1475,7 @@ class ChatSession:
                 tokens_per_second=metrics.get("tokens_per_second"),
                 ttft_ms=metrics.get("ttft_ms"),
                 load_ms=metrics.get("load_ms"),
+                stop_reason=getattr(self.agent, "last_stop_reason", None),
             )
         )
 
@@ -1277,7 +1595,7 @@ class ChatSession:
                 self._final_status_to(queue, GenerationState.ERROR)
                 return
             async for event in self.agent.run(
-                self._context_messages(), model, force_search=force_search, search_query=search_query
+                self._context_messages(text), model, force_search=force_search, search_query=search_query
             ):
                 if isinstance(event, ContentChunk):
                     content_parts.append(event.text)

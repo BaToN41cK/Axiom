@@ -112,6 +112,7 @@ class Done(BaseModel):
     ttft_ms: int | None = None
     #: Real model load time reported by Ollama for this generation (ms).
     load_ms: int | None = None
+    stop_reason: str | None = None
 
 
 ChatEvent = (

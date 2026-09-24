@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from axiom.core.profiles import ProfileManager, DEFAULT_PROFILES
+from axiom.core.profiles import ProfileManager
 
 
 class TestDefaults:
@@ -54,7 +54,7 @@ class TestAddRemove:
 
     def test_update_existing(self):
         mgr = ProfileManager()
-        old = mgr.get("Default")
+        mgr.get("Default")
         mgr.add("Default", "Updated prompt.")
         assert mgr.get("Default") == "Updated prompt."
 

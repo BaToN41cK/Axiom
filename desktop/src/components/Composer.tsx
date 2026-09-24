@@ -1,5 +1,5 @@
 import type { ReactNode, RefObject } from "react";
-import { useMemo, useEffect, useState } from "react";
+import { useMemo, useEffect, useRef, useState } from "react";
 import { ArrowUp, CornerDownLeft, Globe, Image as ImageIcon, Loader2, Square, X } from "lucide-react";
 import type { AxiomConfig } from "../types";
 import { matchingCommands, type SlashCommand } from "../lib/commands";
@@ -21,6 +21,7 @@ interface Props {
   context: { used: number | null; window: number | null; ratio: number | null };
   onOpenContext: () => void;
   composerRef: RefObject<HTMLTextAreaElement>;
+  workspaceFiles: string[];
   /** Compact model selector rendered inside the composer row. */
   modelSelector?: ReactNode;
 }
@@ -55,6 +56,7 @@ export default function Composer(props: Props) {
     context,
     onOpenContext,
     composerRef,
+    workspaceFiles,
   } = props;
 
   const MAX_IMAGES = 3;
@@ -64,6 +66,32 @@ export default function Composer(props: Props) {
   const [notice, setNotice] = useState<string | null>(null);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [mentionStart, setMentionStart] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const mentionMatches = useMemo(() => {
+    if (mentionStart === null || workspaceFiles.length === 0) return [];
+    const token = draft.slice(mentionStart + 1).match(/^[^\\s@]*/)?.[0] ?? "";
+    const query = token.toLowerCase();
+    return workspaceFiles
+      .filter((file) => file.toLowerCase().includes(query))
+      .slice(0, 12);
+  }, [draft, mentionStart, workspaceFiles]);
+
+  useEffect(() => {
+    const cursor = composerRef.current?.selectionStart;
+    if (cursor === undefined || workspaceFiles.length === 0) return;
+    const before = draft.slice(0, cursor);
+    const match = before.match(/(?:^|\\s)@([^\\s@]*)$/);
+    if (!match) {
+      setMentionStart(null);
+      return;
+    }
+    const at = before.lastIndexOf("@", cursor);
+    setMentionStart(at);
+    setMentionIndex(0);
+  }, [draft, composerRef, workspaceFiles.length]);
 
   const commands = useMemo<SlashCommand[]>(() => {
     const trimmed = draft.trim();
@@ -76,13 +104,29 @@ export default function Composer(props: Props) {
     setPaletteIndex(0);
   }, [commands]);
 
+  useEffect(() => {
+    if (!paletteOpen && mentionMatches.length === 0) return;
+    const close = (e: MouseEvent | PointerEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setPaletteOpen(false);
+        setMentionStart(null);
+      }
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("mousedown", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("mousedown", close);
+    };
+  }, [paletteOpen, mentionMatches.length]);
+
   // Auto-grow the textarea up to a sane ceiling.
   useEffect(() => {
     const area = composerRef.current;
     if (!area) return;
     area.style.height = "auto";
     area.style.height = `${Math.min(area.scrollHeight, 232)}px`;
-  }, [draft, composerRef]);
+  }, [draft, composerRef, workspaceFiles.length]);
 
   const flash = (message: string) => {
     setNotice(message);
@@ -119,23 +163,63 @@ export default function Composer(props: Props) {
     if (generating || disabled) return;
     const text = draft.trim();
     if (!text && images.length === 0) return;
+    if (text.startsWith("/") && !images.length) {
+      setPaletteOpen(false);
+      onDraftChange("");
+      void onCommand(text);
+      return;
+    }
     onSend(text, forceSearch, images);
     onDraftChange("");
     setImages([]);
+    setPaletteOpen(false);
   };
 
   const acceptCommand = (command: SlashCommand) => {
     const needsArgument = command.argumentHint != null;
-    onDraftChange(`${command.name} `);
     setPaletteOpen(false);
     if (!needsArgument) {
-      void onCommand(command.name);
       onDraftChange("");
+      void onCommand(command.name);
+    } else {
+      onDraftChange(`${command.name} `);
     }
     composerRef.current?.focus();
   };
 
+  const acceptMention = (file: string) => {
+    if (mentionStart === null) return;
+    const cursor = composerRef.current?.selectionStart ?? draft.length;
+    const after = draft.slice(cursor);
+    const before = draft.slice(0, mentionStart);
+    onDraftChange(`${before}@${file} ${after}`);
+    setMentionStart(null);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  };
+
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionMatches.length > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMentionIndex((index) => Math.min(index + 1, mentionMatches.length - 1));
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMentionIndex((index) => Math.max(index - 1, 0));
+        return;
+      }
+      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+        event.preventDefault();
+        acceptMention(mentionMatches[mentionIndex]);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionStart(null);
+        return;
+      }
+    }
     if (paletteOpen && commands.length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -150,7 +234,19 @@ export default function Composer(props: Props) {
       if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
         event.preventDefault();
         const selected = commands[paletteIndex];
-        if (selected) acceptCommand(selected);
+        if (selected) {
+          // A command with an argument is only being completed when the user
+          // accepts a suggestion. If an argument is already present, Enter
+          // must execute the command instead of repeatedly reinserting it.
+          if (event.key === "Enter" && selected.argumentHint != null
+            && draft.trim() !== selected.name && draft.trim().startsWith(`${selected.name} `)) {
+            const commandText = draft.trim();
+            onDraftChange("");
+            void onCommand(commandText);
+          } else {
+            acceptCommand(selected);
+          }
+        }
         return;
       }
       if (event.key === "Escape") {
@@ -177,7 +273,23 @@ export default function Composer(props: Props) {
   const estimate = Math.max(1, Math.round((draft.length + images.length * 1200) / 4));
 
   return (
-    <div className="composer-area">
+    <div className="composer-area" ref={containerRef}>
+      {mentionMatches.length > 0 && (
+        <div className="mention-palette" role="listbox" aria-label="Файлы проекта">
+          <div className="mention-palette-head">ФАЙЛЫ ПРОЕКТА</div>
+          {mentionMatches.map((file, index) => (
+            <button
+              key={file}
+              className={"mention-item" + (index === mentionIndex ? " cursor" : "")}
+              onMouseEnter={() => setMentionIndex(index)}
+              onClick={() => acceptMention(file)}
+            >
+              <span>{file}</span>
+              <kbd>Tab</kbd>
+            </button>
+          ))}
+        </div>
+      )}
       {paletteOpen && (
         <div className="palette" role="listbox">
           <div className="palette-head">COMMANDS</div>

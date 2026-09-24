@@ -280,8 +280,8 @@ _HARD_MARKERS = (
 #: Scope → tools for each category. Aggressive: an ordinary question gets
 #: zero tools, a file question gets only the read tools it needs.
 _SCOPE_READ = ("read_file", "search_text", "search_files", "list_files")
-_SCOPE_EDIT = ("read_file", "write_file", "edit_file", "search_text", "search_files")
-_SCOPE_TERMINAL = ("run_command",)
+_SCOPE_EDIT = ("read_file", "write_file", "edit_file", "apply_patch", "search_text", "search_files")
+_SCOPE_TERMINAL = ("run_command", "run_tests", "run_linter", "build_project", "verify_changes")
 _SCOPE_GIT = ("git_status", "git_diff", "git_log", "git_branch")
 _SCOPE_PROJECT = ("inspect_project",)
 _SCOPE_WEB = ("web_search", "fetch_url")

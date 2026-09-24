@@ -21,6 +21,11 @@ interface Props {
   onRefresh: () => void;
   onOpenFile: (path: string) => void;
   onCloseFile: () => void;
+  search: string;
+  onSearch: (value: string) => void;
+  searchResults: { path: string; preview: string }[];
+  searchLoading: boolean;
+  onOpenSearchHit: (path: string) => void;
 }
 
 const CODE_EXT = new Set([
@@ -60,7 +65,7 @@ function parseGitStatus(raw: string | null): Map<string, string> {
 
 /** File explorer of the current project (§15). Real tree from the backend. */
 export default function Explorer(props: Props) {
-  const { root, tree, loading, gitStatus, openFile, onRefresh, onOpenFile, onCloseFile } = props;
+  const { root, tree, loading, gitStatus, openFile, onRefresh, onOpenFile, onCloseFile, search, onSearch, searchResults, searchLoading, onOpenSearchHit } = props;
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const toggle = (path: string) => setCollapsed((m) => ({ ...m, [path]: !m[path] }));
   const git = useMemo(() => parseGitStatus(gitStatus), [gitStatus]);
@@ -115,9 +120,31 @@ export default function Explorer(props: Props) {
       <div className="ex-root" title={root ?? ""}>
         {root ? (root.split(/[\\/]/).pop() ?? root) : "нет активного проекта"}
       </div>
+      <div className="ex-search">
+        <input
+          value={search}
+          onChange={(event) => onSearch(event.target.value)}
+          placeholder="Поиск по проекту…"
+          disabled={!root}
+          aria-label="Поиск по проекту"
+        />
+        {searchLoading && <span className="ex-search-hint">поиск…</span>}
+      </div>
+      {search && !searchLoading && searchResults.length > 0 && (
+        <div className="ex-search-results">
+          <div className="ex-search-title">Найдено: {searchResults.length}</div>
+          {searchResults.slice(0, 20).map((hit) => (
+            <button key={hit.path} className="ex-search-hit" onClick={() => onOpenSearchHit(hit.path)}>
+              <span>{hit.path}</span>
+              {hit.preview && <small>{hit.preview}</small>}
+            </button>
+          ))}
+        </div>
+      )}
+      {search && !searchLoading && searchResults.length === 0 && <div className="ex-empty">Совпадений нет</div>}
       <div className="ex-tree">
         {!root ? (
-          <div className="ex-empty">Откройте проект, чтобы видеть его файлы</div>
+          <div className="ex-empty"><b>Проект не открыт</b><span>Выберите папку, чтобы агент мог читать и изменять файлы.</span></div>
         ) : loading ? (
           <div className="ex-empty">Читаю файлы…</div>
         ) : tree.length === 0 ? (

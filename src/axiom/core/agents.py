@@ -19,6 +19,7 @@ class AgentProfile:
 
 DEFAULT_AGENTS: tuple[AgentProfile, ...] = (
     AgentProfile("orchestrator", "Orchestrator"),
+    AgentProfile("analyst", "Analyst"),
     AgentProfile("coder", "Coder"),
     AgentProfile("debugger", "Debugger"),
     AgentProfile("reviewer", "Reviewer"),

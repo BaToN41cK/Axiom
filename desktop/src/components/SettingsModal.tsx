@@ -25,10 +25,7 @@ interface Props {
   providerRows: ProviderRow[];
   providerModels: ProviderModelRow[];
   providerLoading: boolean;
-  onProviderTest: (id: string) => Promise<void>;
-  onProviderSaveKey: (id: string, key: string) => Promise<void>;
-  onProviderSetBaseUrl: (id: string, baseUrl: string) => Promise<void>;
-  onProviderDiscover: (id: string) => Promise<void>;
+  onProviderSaveSettings: (id: string, key: string, baseUrl: string) => Promise<void>;
   onProviderPickModel: (providerId: string, model: string) => Promise<void>;
   onLoadProviders: () => Promise<void>;
 }
@@ -67,10 +64,7 @@ export default function SettingsModal({
   providerRows,
   providerModels,
   providerLoading,
-  onProviderTest,
-  onProviderSaveKey,
-  onProviderSetBaseUrl,
-  onProviderDiscover,
+  onProviderSaveSettings,
   onProviderPickModel,
   onLoadProviders,
 }: Props) {
@@ -164,7 +158,7 @@ export default function SettingsModal({
           <div className="settings-content">
             {section === "general" && <GeneralSection draft={draft} set={set} />}
             {section === "models" && <ModelsSection draft={draft} set={set} config={config} onRestartCore={onRestartCore} />}
-            {section === "providers" && <ProvidersSection rows={providerRows} models={providerModels} loading={providerLoading} onTest={onProviderTest} onSaveKey={onProviderSaveKey} onSetBaseUrl={onProviderSetBaseUrl} onDiscover={onProviderDiscover} onPickModel={onProviderPickModel} />}
+            {section === "providers" && <ProvidersSection rows={providerRows} models={providerModels} loading={providerLoading} onSave={onProviderSaveSettings} onPickModel={onProviderPickModel} />}
             {section === "chat" && <ChatSection draft={draft} set={set} />}
             {section === "tools" && <ToolsSection draft={draft} set={set} />}
             {section === "appearance" && <AppearanceSection draft={draft} set={set} />}
@@ -197,11 +191,10 @@ interface SectionProps {
   draft: AxiomConfig;
   set: <K extends keyof AxiomConfig>(key: K, value: AxiomConfig[K]) => void;
 }
-function ProvidersSection({ rows, models, loading, onTest, onSaveKey, onSetBaseUrl, onDiscover, onPickModel }: {
+function ProvidersSection({ rows, models, loading, onSave, onPickModel }: {
   rows: ProviderRow[]; models: ProviderModelRow[]; loading: boolean;
-  onTest: (id: string) => Promise<void>; onSaveKey: (id: string, key: string) => Promise<void>;
-  onSetBaseUrl: (id: string, baseUrl: string) => Promise<void>;
-  onDiscover: (id: string) => Promise<void>; onPickModel: (providerId: string, model: string) => Promise<void>;
+  onSave: (id: string, key: string, baseUrl: string) => Promise<void>;
+  onPickModel: (providerId: string, model: string) => Promise<void>;
 }) {
   const [selected, setSelected] = useState(rows.find((item) => item.id === "openai_compatible")?.id ?? rows[0]?.id ?? "openai_compatible");
   const [key, setKey] = useState("");
@@ -224,13 +217,11 @@ function ProvidersSection({ rows, models, loading, onTest, onSaveKey, onSetBaseU
       <input type="password" value={key} placeholder={row?.configured ? "•••••••• (сохранён)" : "не задан"} onChange={(e) => setKey(e.target.value)} />
     </Row>
     <Row label="Base URL" hint="Для OpenAI Compatible укажите endpoint с /v1, например http://localhost:8000/v1">
-      <div className="provider-endpoint"><input value={baseUrl} placeholder="https://api.example.com/v1" onChange={(e) => setBaseUrl(e.target.value)} /><button className="btn ghost" onClick={() => void onSetBaseUrl(selected, baseUrl)}>Сохранить URL</button></div>
+      <div className="provider-endpoint"><input value={baseUrl} placeholder="https://api.example.com/v1" onChange={(e) => setBaseUrl(e.target.value)} /></div>
     </Row>
     <div className="settings-actions">
-      <button className="btn ghost" disabled={!row || loading} onClick={() => void onSaveKey(selected, key)}>Сохранить ключ</button>
-      <button className="btn ghost" disabled={!row || loading} onClick={() => void onTest(selected)}>Test</button>
-      <button className="btn ghost" disabled={!row || loading} onClick={() => void onDiscover(selected)}>Discover models</button>
-    </div>
+      <button className="btn primary" disabled={!row || loading} onClick={() => void onSave(selected, key, baseUrl.trim())}>Сохранить</button>
+          </div>
     <Row label="Модель маршрута" hint="Выбранная модель будет реально использоваться следующим запросом">
       <select value="" onChange={(e) => { if (e.target.value) void onPickModel(selected, e.target.value); }}>
         <option value="">Выберите модель…</option>
@@ -551,16 +542,29 @@ function AboutSection() {
   return (
     <div className="settings-about">
       <div className="about-brand">AXIOM</div>
-      <div className="about-sub">LOCAL INTELLIGENCE</div>
+      <div className="about-sub">LOCAL-FIRST AI WORKSPACE</div>
       <p className="about-text">
-        Локальная AI-workspace поверх Ollama: стриминг, reasoning, инструменты, веб-поиск
-        и история разговоров — всё выполняется на вашей машине. Без API-ключей,
-        облаков и обязательного интернета.
+        AXIOM — агент для работы с проектом и документами. Он может отвечать в чате,
+        искать по проекту, читать и изменять файлы, запускать команды и проверять результат.
+        Один и тот же Python core используют TUI и desktop GUI.
+      </p>
+      <div className="about-grid">
+        <div><b>Модели</b><span>Ollama и внешние API через единый streaming runtime.</span></div>
+        <div><b>Проект</b><span>Файловые операции ограничены выбранной рабочей папкой.</span></div>
+        <div><b>Инструменты</b><span>Чтение, поиск, редактирование, terminal, Git и web search.</span></div>
+        <div><b>Контроль</b><span>Tool calls, timeline, permissions и stop reason видны в интерфейсе.</span></div>
+      </div>
+      <p className="about-text">
+        API-ключи и история хранятся локально. Режим <b>auto_approve_all</b> разрешает
+        инструменты без дополнительных вопросов — включайте его только для доверенного проекта.
+      </p>
+      <p className="about-text about-muted">
+        Настройки: <code>~/.axiom/config.json</code> · история: <code>~/.axiom/history</code>.
+        При старте выберите проект в верхней панели.
       </p>
     </div>
   );
 }
-
 function ShortcutsSection() {
   return (
     <div className="shortcuts-list">
@@ -579,4 +583,3 @@ function ShortcutsSection() {
     </div>
   );
 }
-

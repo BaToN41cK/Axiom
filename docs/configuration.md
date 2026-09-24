@@ -98,5 +98,3 @@ workspace и tools находятся в соседних разделах.
 Все настройки меняются через панель `/settings` в TUI (или Settings в GUI)
 и сохраняются в `config.json`. Разовых флагов командной строки больше нет —
 `axiom` всегда запускает TUI, `axiom --gui` — десктопный GUI.
-
-![Settings](../assets/Settings.png)

@@ -379,6 +379,29 @@ async def test_agent_forces_edit_after_plan_and_feeds_tool_errors_to_model():
     )
 
 
+async def test_external_tool_capable_model_gets_workspace_schemas():
+    from axiom.core.agent import Agent
+    from axiom.core.config import Config
+    from axiom.core.models import ModelInfo
+    from axiom.core.state_machine import GenerationStateMachine
+    from axiom.core.tools.filesystem import WorkspaceTools
+    from axiom.core.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    WorkspaceTools().register(registry)
+    schemas = Agent(
+        object(), config=Config(workspace_tools_enabled=True), registry=registry,
+        machine=GenerationStateMachine(),  # type: ignore[arg-type]
+    )._tool_schemas(
+        ModelInfo(name="external/any-model", capabilities=["tools"]),
+        "исправь проект и добавь новую функцию",
+    )
+    assert schemas
+    assert {schema["function"]["name"] for schema in schemas} >= {
+        "read_file", "edit_file", "write_file", "search_text", "search_files"
+    }
+
+
 async def test_agent_returns_failed_tool_result_to_next_model_pass():
     from axiom.core.agent import Agent
     from axiom.core.config import Config
@@ -420,6 +443,48 @@ async def test_agent_returns_failed_tool_result_to_next_model_pass():
     )]
     assert calls == 3
     assert "ERROR: No such file: missing.py" in str(seen[1])
+
+
+async def test_agent_workspace_edit_runs_with_auto_safe_permissions(tmp_path):
+    from axiom.core.agent import Agent
+    from axiom.core.config import Config
+    from axiom.core.models import ModelInfo
+    from axiom.core.ollama import StreamChunk, ToolCallRequest
+    from axiom.core.permissions import PermissionManager
+    from axiom.core.state_machine import GenerationStateMachine
+    from axiom.core.tools.filesystem import WorkspaceTools
+    from axiom.core.tools.registry import ToolRegistry
+
+    target = tmp_path / "main.py"
+    target.write_text("old\n", encoding="utf-8")
+    registry = ToolRegistry()
+    WorkspaceTools(tmp_path).register(registry)
+    calls = 0
+
+    class _Client:
+        async def chat(self, model, messages, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                yield StreamChunk(tool_calls=[ToolCallRequest(
+                    name="edit_file",
+                    arguments={"path": "main.py", "old_text": "old", "new_text": "new"},
+                )], done=True)
+            else:
+                yield StreamChunk(content="Готово", done=True)
+
+    agent = Agent(_Client(), config=Config(workspace_tools_enabled=True), registry=registry,
+                  machine=GenerationStateMachine())  # type: ignore[arg-type]
+    agent.attach_harness(permissions=PermissionManager(
+        config=Config(permission_mode="auto_approve_safe")
+    ))
+    events = [event async for event in agent.run(
+        [{"role": "user", "content": "исправь main.py"}],
+        ModelInfo(name="m", capabilities=["tools"]),
+    )]
+    assert any(getattr(event, "type", "") == "tool_result" and event.ok for event in events)
+    assert target.read_text(encoding="utf-8") == "new\n"
+
 
 
 def test_should_fallback_reads_real_error_kind():

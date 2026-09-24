@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-import pytest
-
-from axiom.core.context import ContextManager, ContextReport
+from axiom.core.context import ContextManager
 
 
 async def fake_summarise(prompt: str) -> str:

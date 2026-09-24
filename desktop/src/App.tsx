@@ -67,6 +67,11 @@ function WorkbenchSide({ store: s }: { store: AxiomStore }) {
           onRefresh={() => void s.loadTree()}
           onOpenFile={(p) => void s.openWorkspaceFile(p)}
           onCloseFile={() => s.setOpenFile(null)}
+          search={s.projectSearch}
+          onSearch={s.setProjectSearch}
+          searchResults={s.projectSearchResults.hits}
+          searchLoading={s.projectSearching}
+          onOpenSearchHit={s.openProjectSearchHit}
         />
       )}
       {tab === "terminal" && (
@@ -144,10 +149,7 @@ export default function App() {
            providerRows={s.providerRows}
            providerModels={s.providerModels}
            providerLoading={s.providerLoading}
-           onProviderTest={s.providerTest}
-           onProviderSaveKey={s.providerSaveKey}
-           onProviderSetBaseUrl={s.providerSetBaseUrl}
-           onProviderDiscover={s.providerDiscover}
+           onProviderSaveSettings={s.providerSaveSettings}
            onProviderPickModel={s.providerPickModel}
            onLoadProviders={s.loadProviders}
           />
@@ -203,6 +205,11 @@ export default function App() {
             onTogglePin={(path) => void s.toggleWorkspacePin(path)}
           />
           <div className="topbar-spacer" />
+          <div className="topbar-context" title="Текущий маршрут">
+            <span className="topbar-provider">{s.activeModelProvider === "ollama" ? "Ollama" : s.activeModelProvider}</span>
+            <span className="topbar-model">{s.activeModel ?? "модель не выбрана"}</span>
+            <span className="topbar-tools">{s.activeModelInfo?.capabilities.includes("tools") ? "Tools включены" : "Только текст"}</span>
+          </div>
           <div className="access-dot" title={s.accessTitle}>{s.accessLabel}</div>
           <button
             className="icon-btn"
@@ -248,9 +255,17 @@ export default function App() {
               onContinue={s.continueGeneration}
             />
 
+            {s.lastAction && (
+              <div className={"last-action" + (s.lastAction.ok ? " ok" : " error")}>
+                <span className="last-action-label">Последнее действие</span>
+                <span className="last-action-name">{s.lastAction.name}</span>
+                {s.lastAction.detail && <span className="last-action-detail">{s.lastAction.detail}</span>}
+                <span className="last-action-state">{s.lastAction.ok ? "готово" : "ошибка"}</span>
+              </div>
+            )}
             <Composer
               generating={s.generating}
-              disabled={!s.connected}
+              disabled={!s.connected && !s.activeModel}
               draft={s.draft}
               onDraftChange={s.setDraft}
               onSend={s.send}
@@ -262,7 +277,8 @@ export default function App() {
               }
               config={s.config}
               modelName={s.activeModel}
-              modelSupportsVision={s.activeModelInfo?.capabilities.includes("vision") ?? null}
+               workspaceFiles={s.workspaceFiles}
+               modelSupportsVision={s.activeModelInfo?.capabilities.includes("vision") ?? null}
               context={s.context}
               onOpenContext={() => s.openOverlay("context")}
               composerRef={s.composerRef}
@@ -273,7 +289,7 @@ export default function App() {
                   loading={s.modelsLoading}
                   error={s.modelsError}
                   switching={s.switchingModel}
-                  disabled={!s.connected}
+                  disabled={!s.connected && !s.activeModel}
                   openSignal={s.modelMenuSignal}
                   onSelect={s.selectModel}
                   onRefresh={s.refreshModels}
@@ -296,10 +312,7 @@ export default function App() {
            providerRows={s.providerRows}
            providerModels={s.providerModels}
            providerLoading={s.providerLoading}
-           onProviderTest={s.providerTest}
-           onProviderSaveKey={s.providerSaveKey}
-           onProviderSetBaseUrl={s.providerSetBaseUrl}
-           onProviderDiscover={s.providerDiscover}
+           onProviderSaveSettings={s.providerSaveSettings}
            onProviderPickModel={s.providerPickModel}
            onLoadProviders={s.loadProviders}
          />

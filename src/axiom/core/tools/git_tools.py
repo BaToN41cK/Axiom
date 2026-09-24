@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from axiom.core.tools.base import ToolDefinition, ToolPermission, ToolResult
+from axiom.core.tools.base import RISK_SAFE, ToolDefinition, ToolPermission, ToolResult
 from axiom.core.tools.filesystem import default_workspace_root
 
 GIT_STATUS_TOOL = "git_status"
@@ -64,7 +64,14 @@ class GitTools:
         props: dict = {"type": "object", "properties": {}, "required": []}
         if extra:
             props["properties"] = extra
-        return ToolDefinition(name=name, description=desc, parameters=props, permission=ToolPermission.ALWAYS)
+        return ToolDefinition(
+            name=name, description=desc, parameters=props,
+            permission=ToolPermission.ALWAYS,
+            risk=RISK_SAFE,
+            timeout=_TIMEOUT,
+            max_output=_MAX_CHARS,
+            workspace_scoped=True,
+        )
 
     # ---------------------------------------------------------- registration
 

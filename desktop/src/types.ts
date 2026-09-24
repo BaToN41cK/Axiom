@@ -27,10 +27,21 @@ export interface CreateProjectOptions {
   template?: string; // e.g., "empty", "node", "python", etc.
 }
 
+export interface ProjectSearchHit {
+  path: string;
+  preview: string;
+}
+
 export interface ProjectSearchResult {
-  matches: ProjectInfo[];
   query: string;
-  total: number;
+  hits: ProjectSearchHit[];
+  error?: string;
+}
+
+
+export interface WorkspaceFilesResult {
+  files: string[];
+  error?: string;
 }
 
 export interface WorkspaceState {
@@ -164,6 +175,7 @@ export interface DoneMetrics {
   ttftMs?: number | null;
   /** Real model load time reported by Ollama for this generation (ms). */
   loadMs?: number | null;
+  stopReason?: string | null;
 }
 
 export type CoreEvent =
@@ -173,6 +185,7 @@ export type CoreEvent =
   | { type: "tool_result"; name: string; ok: boolean; content: string; error: string | null; durationMs: number }
   | { type: "search_result"; query: string; sources: SourceItem[] }
   | { type: "status"; state: string; detail: string | null }
+  | { type: "orchestration"; kind: string; actor: string; summary: string; seq: number }
   | { type: "error"; message: string; kind: string; hint: string | null }
   | ({ type: "done" } & DoneMetrics);
 

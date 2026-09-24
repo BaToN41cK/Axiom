@@ -38,6 +38,7 @@ from axiom.core.performance import (
 )
 from axiom.core.state import GenerationState
 from axiom.core.state_machine import GenerationStateMachine
+from axiom.core.tools.base import ToolResult
 from axiom.core.tools.registry import ToolRegistry
 from axiom.core.tools.web_search import (
     FETCH_URL_TOOL,
@@ -60,8 +61,9 @@ MAX_AUTO_FETCH = 2
 MAX_PAGE_CHARS = 6000
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are AXIOM, a precise local AI assistant running on the user's machine "
-    "through Ollama. Answer directly and accurately. Use markdown when it helps. "
+    "You are AXIOM, a precise AI assistant running on the user's machine "
+    "through the configured model provider (Ollama or an external API). "
+    "Answer directly and accurately. Use markdown when it helps. "
     "Never invent facts; if you are unsure, say so.\n\n"
     "You have real tools:\n"
     "- web_search(query) — search the public web; use it whenever the answer "
@@ -82,7 +84,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "- git_status/git_diff/git_log/git_branch — read-only git inspection.\n"
     "When the user asks about their project, do not guess: list and read the "
     "actual files. When asked to change code, read first, then edit or write. "
-    "All paths are relative to the workspace root."
+    "If you have filesystem tools, you MUST use them instead of only describing a plan. "
+    "All paths are relative to the workspace root.\n\n"
+    "For project tasks follow: understand → investigate → plan → execute → verify → "
+    "correct → report. Never claim a test, build, file, Git state, or tool result "
+    "that was not actually observed. Read a file before editing it, prefer minimal "
+    "local changes, and use the explicitly mentioned files as the primary context. "
+    "If work is not verified, say exactly what remains unverified."
 )
 
 WORKSPACE_PROMPT_ADDON = (
@@ -182,6 +190,7 @@ class Agent:
         self._sandbox = None
         self._skills = None
         self._verifier = None
+        self._permissions = None
         self.last_route: dict = {}
         self.last_verify: dict = {}
         self._max_rounds = MAX_TOOL_ROUNDS + (3 if config.workspace_tools_enabled else 0)
@@ -189,6 +198,7 @@ class Agent:
         self.last_content = ""
         self.last_thinking = ""
         self.last_metrics: dict = {}
+        self.last_stop_reason: str | None = None
         self.metrics: dict = {}
         #: Benchmark profile of the most recent run (set by :meth:`run`).
         self.perf: PerformanceMetrics | None = None
@@ -246,6 +256,9 @@ class Agent:
             return None
         if model.supports("tools") is not True:
             return None
+        # External provider models are marked tool-capable by the bridge.  The
+        # scope is request-driven, but a coding request must always receive the
+        # real workspace tools even when the model name itself is unfamiliar.
         terminal_ok = self._config.terminal_enabled and self._config.access_mode != "read_only"
         scope = tool_scope(
             user_text or "",
@@ -257,8 +270,11 @@ class Agent:
             return None
         allowed: set[str] = set(scope)
         if not terminal_ok:
-            allowed.discard("run_command")
-            allowed.discard("run_tests")
+            # §34: verification tools spawn processes too — no terminal, no
+            # test/lint/build commands advertised to the model.
+            for name in ("run_command", "run_tests", "run_linter",
+                         "build_project", "verify_changes"):
+                allowed.discard(name)
         # Sandbox (п.13): DENY-тулы не рекламируем модели вообще.
         if self._sandbox is not None:
             allowed = {name for name in allowed if self._sandbox.allows(name)}
@@ -456,7 +472,32 @@ class Agent:
             result = _TR(name=call.name, ok=False,
                          error=f"Blocked by sandbox policy: {call.name} is denied.")
         else:
-            result = await self._registry.execute(call.name, call.arguments)
+            if self._permissions is None:
+                result = await self._registry.execute(call.name, call.arguments)
+            else:
+                permission = self._registry.permission_for(call.name, call.arguments)
+                try:
+                    approved = await self._permissions.decide(
+                        call.name, call.arguments, permission
+                    )
+                except Exception as exc:
+                    result = ToolResult(
+                        name=call.name,
+                        ok=False,
+                        error=f"Permission check failed: {exc}",
+                    )
+                else:
+                    if approved:
+                        result = await self._registry.execute(
+                            call.name, call.arguments, approved=True
+                        )
+                    else:
+                        result = ToolResult(
+                            name=call.name,
+                            ok=False,
+                            error="Permission denied by the current permission mode.",
+                            data={"permission": permission.value},
+                        )
         if self._bus is not None:
             try:
                 self._bus.emit("tool.after", {"tool": result.name, "ok": result.ok,
@@ -555,7 +596,7 @@ class Agent:
     # ------------------------------------------------------------- agent loop
 
     def attach_harness(self, bus=None, trajectory=None, router=None, catalog=None,
-                       sandbox=None, skills=None, verifier=None) -> None:
+                       sandbox=None, skills=None, verifier=None, permissions=None) -> None:
         """Подключить EventBus + Trajectory + Router + Sandbox + Skills (п.6/10/13/14/16)."""
         self._bus = bus if bus is not None else self._bus
         self._trajectory = trajectory if trajectory is not None else self._trajectory
@@ -569,6 +610,8 @@ class Agent:
             self._skills = skills
         if verifier is not None:
             self._verifier = verifier
+        if permissions is not None:
+            self._permissions = permissions
 
     async def run(
         self,
@@ -584,6 +627,7 @@ class Agent:
         self.last_content = ""
         self.last_thinking = ""
         self.last_metrics: dict = {}
+        self.last_stop_reason = None
         self._pasted_pages = []
         last_ttft: int | None = None
 
@@ -673,6 +717,7 @@ class Agent:
             messages = self._build_messages(history, system)
         rounds = 0
         forced_edit_once = False
+        seen_tool_calls: set[str] = set()
         tool_rounds = 0
         tool_total_s = 0.0
         prompt_built_at = time.perf_counter()
@@ -709,9 +754,15 @@ class Agent:
             first_pass = False
 
             if not result.tool_calls:
+                self.last_stop_reason = "completed"
                 if (not forced_edit_once and rounds < self._max_rounds and any(
                     marker in user_text.lower()
-                    for marker in ("сделай", "доработа", "улучш", "реализуй", "исправ", "добавь", "измени")
+                    for marker in (
+                        "сделай", "доработа", "улучш", "реализуй", "исправ",
+                        "добавь", "измени", "создай", "напиши", "перенеси",
+                        "implement", "fix", "add", "change", "create", "write",
+                        "modify", "refactor", "update",
+                    )
                 )):
                     messages.append(
                         {
@@ -729,12 +780,22 @@ class Agent:
                     continue
                 break
             if rounds >= self._max_rounds:
+                self.last_stop_reason = "tool_round_limit"
                 break
             rounds += 1
 
             if result.content.strip():
                 messages.append({"role": "assistant", "content": result.content})
             for call in result.tool_calls:
+                signature = repr((call.name, sorted(call.arguments.items())))
+                if signature in seen_tool_calls:
+                    tool_error = "Duplicate tool call suppressed; the same call already ran in this turn."
+                    yield ToolResultEvent(
+                        name=call.name, ok=False, content="", error=tool_error,
+                    )
+                    messages.append({"role": "system", "content": f"Tool result ({call.name}): ERROR: {tool_error}"})
+                    continue
+                seen_tool_calls.add(signature)
                 tool_block = ""
                 tool_error = ""
                 tool_call_started = time.perf_counter()

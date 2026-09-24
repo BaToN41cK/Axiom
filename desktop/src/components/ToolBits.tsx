@@ -66,8 +66,8 @@ export function ToolActivityList({ calls }: ToolProps) {
   return (
     <div className="tool-list">
       {calls.map((call, index) => (
-        <div key={`${call.name}-${index}`} className={"tool-card " + call.state}>
-          <div className="tool-card-head">
+        <details key={`${call.name}-${index}`} className={"tool-card " + call.state} open={call.state === "running" || call.state === "failed"}>
+          <summary className="tool-card-head">
             <span className="tool-icon">
               <ToolGlyph name={call.name} />
             </span>
@@ -97,10 +97,10 @@ export function ToolActivityList({ calls }: ToolProps) {
                 <span className="tool-duration">{call.durationMs} ms</span>
               )}
             </span>
-          </div>
-          {call.detail && <div className="tool-target">«{call.detail}»</div>}
+          </summary>
+          {call.detail && <div className="tool-target">{call.detail}</div>}
           {call.state === "failed" && call.error && <div className="tool-error">{call.error}</div>}
-        </div>
+        </details>
       ))}
     </div>
   );
